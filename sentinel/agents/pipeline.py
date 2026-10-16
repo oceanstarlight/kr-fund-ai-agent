@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import operator
 import time
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated, Any, TypedDict
 
@@ -43,6 +44,7 @@ class State(TypedDict, total=False):
     vol_method: str
     interval_method: str
     use_curated_tags: bool  # replay: False lets the planner classify the event text itself
+    no_llm: bool  # rule planner and template brief even when a key is set (automatic analyses)
     event_id: str
     event_text: str
     horizons: tuple[int, ...]
@@ -131,7 +133,8 @@ def planner_node(state: State) -> dict:
     tags = {**ev.tags(), "headline_ko": ev.name, "rationale_ko": ev.note or ev.description} if use_tags else None
     text = state.get("event_text") or _signals_text(state.get("detection", {}))
     feedback = (state.get("verification") or {}).get("feedback") if attempt else None
-    plan, engine = llm.plan_event(text, attempt, tags, feedback)
+    with (llm.disabled() if state.get("no_llm") else nullcontext()):
+        plan, engine = llm.plan_event(text, attempt, tags, feedback)
     cls = plan.classification.model_dump()
     cands = "; ".join(
         f"{c.label_ko}(최대 {c.analog_k}건, 유사도 {c.min_similarity:.2f}{', 동일 유형' if c.same_type_only else ''})"
@@ -247,7 +250,8 @@ def reviewer_node(state: State) -> dict:
         "rule_checks": [{"check": c["check"], "ok": c["ok"]} for c in state["verification"]["checks"]],
         "known_unknowns": [{"code": u.code, "message": u.message} for u in unknowns],
     }
-    review, problems = llm.review_result(facts, context)
+    with (llm.disabled() if state.get("no_llm") else nullcontext()):
+        review, problems = llm.review_result(facts, context)
     verification = dict(state["verification"])
     if review is None:
         if problems == ["llm unavailable"]:

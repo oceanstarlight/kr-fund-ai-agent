@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
+from contextlib import contextmanager
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -43,9 +45,23 @@ class EventClassification(BaseModel):
     rationale_ko: str = Field(description="1-2 Korean sentences on why these channels apply")
 
 
+_LOCAL = threading.local()
+
+
+@contextmanager
+def disabled():
+    """Turn the LLM off for the current thread only (e.g. automatic analyses in the app)."""
+    prev = getattr(_LOCAL, "off", False)
+    _LOCAL.off = True
+    try:
+        yield
+    finally:
+        _LOCAL.off = prev
+
+
 def provider() -> str:
     """Active LLM provider: 'gemini', 'anthropic' or 'none'."""
-    if os.environ.get("SENTINEL_DISABLE_LLM"):
+    if os.environ.get("SENTINEL_DISABLE_LLM") or getattr(_LOCAL, "off", False):
         return "none"
     has_gemini = bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
     has_anthropic = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))

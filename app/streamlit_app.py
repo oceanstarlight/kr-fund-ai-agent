@@ -15,7 +15,8 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sentinel import config  # noqa: E402
+from sentinel import config, gdelt_monitor, geo, shock_map  # noqa: E402
+from sentinel.agents import llm as llm_mod  # noqa: E402
 from sentinel.agents.llm import llm_available, models, provider  # noqa: E402
 from sentinel.agents.pipeline import run  # noqa: E402
 from sentinel.backtest import run_backtest, summarize  # noqa: E402
@@ -24,6 +25,7 @@ from sentinel.data.quality import schema_table  # noqa: E402
 from sentinel.data.store import DataUnavailable, MarketData  # noqa: E402
 from sentinel.data.universe import ASSETS, FACTORS, PRESETS, normalize  # noqa: E402
 from sentinel.events.library import load_events  # noqa: E402
+from sentinel.live import LiveTracker  # noqa: E402
 
 # Reference palette (dataviz skill): categorical slots 1-3, text inks.
 C_A, C_B, C_REAL = "#2a78d6", "#eb6834", "#1baf7a"
@@ -136,6 +138,33 @@ st.sidebar.markdown(
 
 
 # ------------------------------------------------------------------------ views
+def country_table(pnl: pd.Series, top: int = 10) -> pd.DataFrame:
+    s = pnl.drop("OTHER", errors="ignore")
+    s = s[s != 0].sort_values(key=abs, ascending=False).head(top)
+    return pd.DataFrame({"국가": [geo.COUNTRIES[c][0] if c in geo.COUNTRIES else c for c in s.index],
+                         "손익": [shock_map.money(v, currency) for v in s.values]})
+
+
+def render_shock_map(state: dict) -> None:
+    st.subheader("Shock Map (충격 파장 지도)")
+    replay = state.get("mode") == "replay" and state.get("event") is not None
+    fig = shock_map.replay_map(state, md, aum, currency) if replay else shock_map.static_map(state, aum, currency)
+    m1, m2 = st.columns([3, 1])
+    with m1:
+        st.plotly_chart(fig, width="stretch", key=f"shock_{state.get('mode')}", config={"displayModeBar": False})
+    with m2:
+        h = config.PRIMARY_HORIZON
+        st.caption(f"국가별 예상 손익 (D+{h})")
+        st.dataframe(country_table(geo.country_pnl(state["weights"], state["impacts"][h].asset_blend_median, aum)),
+                     hide_index=True)
+    st.caption(
+        "원 면적 ∝ 손익 크기, 파랑 = 이익 · 빨강 = 손실. 꽉 찬 원 = 실측, 테두리 원 = 예측(D+1/D+5/D+20 중 해당 시점 이전 최신). "
+        "곡선은 사건 지점에서 포트폴리오 노출 국가로의 영향 경로(인접국이 아니라 보유 자산 기준). "
+        "국가 비중은 ETF 운용사 공개 비중(현재 시점) 기준이며, 금·헤지펀드 복제 등 국가가 없는 자산은 표시하지 않음."
+        + ("" if replay else " Ask 모드는 사건 위치를 분류된 지역의 대표 지점으로 표시함.")
+    )
+
+
 def render_trace(state: dict) -> None:
     icons = {"orchestrator": "0", "sentinel": "1", "planner": "2", "executor": "3",
              "verifier": "4", "reviewer": "5", "brief": "6", "evaluate": "7"}
@@ -242,6 +271,8 @@ def render_result(state: dict) -> None:
                 rows.append({"변수": f.name, "불리(25%)": fmt(r["q25"]), "기본(50%)": fmt(r["q50"]), "유리(75%)": fmt(r["q75"])})
             st.dataframe(pd.DataFrame(rows), hide_index=True)
 
+    render_shock_map(state)
+
     st.subheader(f"Impact Brief ({'LLM 작성·수치 감사 통과' if state['brief_engine'] == 'llm' else '템플릿'})")
     st.markdown(state["brief"])
 
@@ -256,12 +287,75 @@ def render_result(state: dict) -> None:
 
 
 # ------------------------------------------------------------------------ tabs
-tab_replay, tab_ask, tab_bt, tab_data = st.tabs(["Replay (과거 사건 재현)", "Ask (사건 질의)", "Backtest", "데이터·출처"])
+# ------------------------------------------------------------------- live map
+@st.cache_resource(show_spinner=False)
+def live_tracker() -> LiveTracker:
+    return LiveTracker()  # one GDELT history per app process, shared by all sessions
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def alert_impact(event_text: str, weights_key: tuple, aum_v: float, data_asof: str) -> pd.Series:
+    """Rule-only analysis of a live alert (no LLM cost), as P&L by country at the primary horizon."""
+    w = dict(weights_key)
+    with llm_mod.disabled():
+        st_ = run(md, w, mode="ask", event_text=event_text, no_llm=True)
+    return geo.country_pnl(w, st_["impacts"][config.PRIMARY_HORIZON].asset_blend_median, aum_v)
+
+
+live_on = st.sidebar.toggle("실시간 GDELT 감시 지도", value=True,
+                            help="15분마다 공개되는 GDELT 사건 파일로 국가별 분쟁 보도 긴장도를 계산해요 (무료, LLM 미사용).")
+
+
+@st.fragment(run_every=300 if live_on else None)
+def live_section() -> None:
+    if not live_on:
+        return
+    tracker = live_tracker()
+    with st.spinner("GDELT 최신 파일 확인 중... (처음에는 하루치 이력을 받느라 10초 정도 걸려요)"):
+        snap = tracker.update()
+    st.subheader("실시간 지정학 긴장도 (GDELT 15분 단위)")
+    if snap.scores.empty:
+        st.warning("GDELT 데이터를 아직 받지 못했어요." + (f" ({snap.error})" if snap.error else ""))
+        return
+    arcs = {}
+    for a in snap.alerts[:3]:
+        try:
+            arcs[a.country] = alert_impact(a.event_text(), tuple(sorted(weights.items())), aum, str(md.last_date))
+        except Exception as exc:  # noqa: BLE001 - the map must still render
+            st.caption(f"{a.name} 경보 영향 계산 실패: {type(exc).__name__}")
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        st.plotly_chart(shock_map.live_map(snap.scores, snap.alerts, arcs, gdelt_monitor.GDELT_Z,
+                                           gdelt_monitor.GDELT_MIN_MENTIONS, currency),
+                        width="stretch", key="live_map")
+    with c2:
+        st.metric("최신 파일 (UTC)", str(snap.slot)[5:16] if snap.slot is not None else "-")
+        st.caption(f"이력 {snap.history_slots}개 파일 · 5분마다 자동 확인" + (f" · 마지막 오류: {snap.error}" if snap.error else ""))
+        if snap.alerts:
+            for a in snap.alerts[:5]:
+                st.error(f"경보 {a.name} · {a.slot[5:16]} UTC · z {a.z:.1f}\n\n{', '.join(a.top_actions)}")
+        else:
+            st.success("경보 없음")
+        top = snap.scores.dropna(subset=["z"]).sort_values("z", ascending=False).head(5)
+        if len(top):
+            st.dataframe(pd.DataFrame({"국가": top["name"], "z": top["z"].map(lambda v: f"{v:+.1f}"),
+                                       "분쟁 보도": top["conflict_mentions"].map(lambda v: f"{v:.0f}")}), hide_index=True)
+    st.caption(
+        f"원 면적 ∝ 긴장도(z-score, 국가별 최근 이력 대비 분쟁 보도 비중). 회색 = 평상, 노랑 = z {gdelt_monitor.GDELT_Z:g} 이상 급등"
+        f"(가운데 점 = 보도량 {gdelt_monitor.GDELT_MIN_MENTIONS}건 미만이라 경보 제외), 빨강 + 동심원 = 경보"
+        f"({gdelt_monitor.GDELT_PERSIST}회 연속 급등). 경보 국가에서 뻗은 곡선은 규칙 기반 자동 분석(LLM 미사용)의 국가별 예상 손익(D+{config.PRIMARY_HORIZON})."
+    )
+
+
+live_section()
+
+tab_replay, tab_ask, tab_map, tab_bt, tab_data = st.tabs(
+    ["Replay (과거 사건 재현)", "Ask (사건 질의)", "사건 지도", "Backtest", "데이터·출처"])
 
 with tab_replay:
     events = [e for e in load_events() if md.trading_day_before(e.t0) is not None]
     ev_id = st.selectbox(
-        "재현할 사건", [e.id for e in reversed(events)],
+        "재현할 사건", [e.id for e in reversed(events)], key="replay_event",
         format_func=lambda i: next(f"{e.t0.date()}  {e.name}" for e in events if e.id == i),
     )
     ev = next(e for e in events if e.id == ev_id)
@@ -286,6 +380,29 @@ with tab_ask:
         cls = ak["classification"]
         st.caption(f"분류: {cls['type']} / {cls['region']} / {', '.join(cls['channels'])} ({ak['classifier']}) - {cls.get('rationale_ko', '')}")
         render_result(ak)
+
+with tab_map:
+    h_lib = config.PRIMARY_HORIZON
+    st.write(f"사건 라이브러리 전체. 원 면적 ∝ 현재 포트폴리오로 겪었을 실측 손익 크기(D+{h_lib}), 색 = 사건 유형, "
+             "테두리 = 손실(빨강)/이익(파랑). 원을 클릭하면 Replay 탭의 사건이 바뀌어요.")
+
+    def _pick_event() -> None:
+        sel = st.session_state.get("library_map")
+        pts = (sel or {}).get("selection", {}).get("points", []) if sel else []
+        if pts and pts[0].get("customdata"):
+            cd = pts[0]["customdata"]
+            st.session_state["replay_event"] = cd[0] if isinstance(cd, list) else cd
+
+    lib = shock_map.library_rows(md, weights, h_lib)
+    st.plotly_chart(shock_map.library_map(lib), width="stretch", key="library_map",
+                    on_select=_pick_event, selection_mode="points")
+    picked = st.session_state.get("replay_event")
+    if picked:
+        st.info(f"선택한 사건: {next((r['name'] for _, r in lib.iterrows() if r['id'] == picked), picked)} → Replay 탭에서 실행하세요.")
+    st.dataframe(lib.assign(realized=lib["realized"].map(lambda v: f"{v:+.2%}" if pd.notna(v) else "-"))
+                 [["date", "name", "type", "realized"]].rename(columns={"date": "날짜", "name": "사건", "type": "유형",
+                                                                        "realized": f"실측 D+{h_lib}"}),
+                 hide_index=True)
 
 with tab_bt:
     st.write("사건 라이브러리 전체에 대한 Leave-one-out 백테스트 (사건 직전 데이터만 사용).")

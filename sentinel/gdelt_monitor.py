@@ -184,3 +184,30 @@ def detect(history: pd.DataFrame, latest: pd.DataFrame, latest_raw: pd.DataFrame
 
 def trim_history(history: pd.DataFrame, now: pd.Timestamp) -> pd.DataFrame:
     return history[history["slot"] > now - GDELT_HISTORY_SLOTS * SLOT].reset_index(drop=True)
+
+
+def country_scores(history: pd.DataFrame, latest: pd.DataFrame) -> pd.DataFrame:
+    """Robust z of the latest conflict share for every watched country (for the live map).
+
+    Unlike ``detect`` this keeps sub-threshold countries; ``z`` is NaN while history is short.
+    """
+    cols = ["country", "name", "share", "z", "conflict_mentions", "goldstein"]
+    if latest is None or latest.empty:
+        return pd.DataFrame(columns=cols)
+    now = pd.Timestamp(latest["slot"].iloc[0])
+    past = history[history["slot"] < now] if len(history) else history
+    n_slots = past["slot"].nunique() if len(past) else 0
+    cur = latest.set_index("country")
+    rows = []
+    for c, name in WATCH.items():
+        share = float(cur.at[c, "share"]) if c in cur.index else 0.0
+        mentions = float(cur.at[c, "conflict_mentions"]) if c in cur.index else 0.0
+        gold = float(cur.at[c, "goldstein"]) if c in cur.index else float("nan")
+        z = float("nan")
+        if n_slots >= GDELT_MIN_HISTORY:
+            hist = past.loc[past["country"] == c, "share"].to_numpy()
+            hist = np.concatenate([hist, np.zeros(max(0, n_slots - len(hist)))])
+            z = _robust_z(share, hist)
+        rows.append({"country": c, "name": name, "share": share, "z": z,
+                     "conflict_mentions": mentions, "goldstein": gold})
+    return pd.DataFrame(rows, columns=cols)
