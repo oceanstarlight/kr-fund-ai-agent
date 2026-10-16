@@ -1,0 +1,10 @@
+anthropic>=1.15
+langgraph>=1.2
+pandas>=2.2
+numpy>=2.0
+requests>=2.32
+pydantic>=2.10
+streamlit>=1.40
+plotly>=6.0
+xlrd>=2.0
+pytest>=8.0

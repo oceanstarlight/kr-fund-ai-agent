@@ -1,0 +1,61 @@
+# MACRO SENTINEL (가칭)
+
+지정학·매크로 충격을 감지하고, 포트폴리오 영향을 **과거 실측 데이터 기반**으로 추정한 뒤, 실제 결과와 비교해 검증하는 관찰형 AI Agent입니다. 「국부펀드 KIC, AI 에이전트 공모전」 출품용 프로토타입입니다.
+
+- 기획서 원고: [`docs/proposal.md`](docs/proposal.md)
+- 파이프라인 그림: [`docs/images/pipeline.png`](docs/images/pipeline.png)
+- 백테스트 결과: [`reports/`](reports)
+
+## 구현 범위 (P0)
+
+| 구성 | 위치 | 내용 |
+|---|---|---|
+| 데이터 수집·캐시 | `sentinel/data/` | FRED, Yahoo 시세, GPR 일간 지수, GDELT. 캐시와 출처 manifest(출처, 수집 시각, 이용 조건, 전처리) |
+| 사건 라이브러리 | `sentinel/events/events.json` | 2008~2025년 22개 사건 (유형, 지역, 전이 경로, 시장 반응 첫 거래일 t0) |
+| 정량 엔진 | `sentinel/quant/` | 엔진 A 팩터모델(주간 Ridge 회귀), 엔진 B 과거사건 재현, 변동성 국면 보정, VaR/CVaR, 자산별 기여도 |
+| Sentinel | `sentinel/monitor.py` | 시장 변수 일간 z-score, GPR 지수 z-score 이상 감지 |
+| Agent 파이프라인 | `sentinel/agents/pipeline.py` | LangGraph: Orchestrator → Sentinel → Event Analyst → Scenario Builder → Quant Engine → Verifier(재분석 루프 최대 2회) → Brief → Evaluate |
+| LLM | `sentinel/agents/llm.py` | 사건 분류(Claude Haiku 5.5, 구조화 출력), 브리프(Claude Sonnet 5.5). 숫자는 placeholder로만 쓰게 하고 감사 후 치환 |
+| Replay / 백테스트 | `sentinel/backtest.py` | 사건별 Leave-one-out, 사건 직전 데이터만 사용 |
+| UI | `app/streamlit_app.py` | Replay, Ask, Backtest, 데이터·출처 탭 |
+
+## 실행 방법
+
+```bash
+python -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+
+python scripts/build_snapshot.py          # 데이터 수집 → data/cache (약 10초)
+python scripts/run_backtest.py --offline  # 백테스트 → reports/
+streamlit run app/streamlit_app.py        # 대시보드
+python -m pytest -q                       # 테스트 (네트워크 불필요)
+```
+
+LLM 사용은 선택입니다. `ANTHROPIC_API_KEY`가 없으면 규칙 기반 분류와 템플릿 브리프로 동작합니다 (`.env.example` 참고).
+
+## 설계 원칙
+
+1. **LLM은 계산하지 않는다.** 모든 수치는 Python 정량 엔진이 만들고, LLM 브리프는 `[[fact_key]]` 자리표시자로만 숫자를 인용합니다. 자리표시자 밖에 숫자가 있으면 감사에서 탈락하고 템플릿으로 대체됩니다.
+2. **미래 정보 누수 차단.** Replay·백테스트에서 민감도와 시장 데이터는 사건 직전 종가까지만 쓰고, 유사 사건은 관측 구간(최대 D+20)이 예측 기준일 이전에 끝난 사건만 씁니다.
+3. **교차 검증.** 독립된 두 엔진(팩터모델 / 사건 재현)의 차이가 허용치를 넘거나 유사 사건이 부족하면 Verifier가 유사 사건 선정을 바꿔 재분석합니다.
+
+## 백테스트 요약 (국부펀드형, 사건 21건)
+
+| 기간 | 방향 적중 | MAE | 0% 기준선 MAE | 기준선 대비 |
+|---|---|---|---|---|
+| D+1 | 81% | 1.12% | 1.29% | +13% |
+| D+5 | 67% | 1.56% | 1.75% | +10% |
+| D+20 | 43% | 3.78% | 2.25% | -68% |
+
+D+1, D+5에서는 단순 기준선보다 오차가 작지만 **D+20에서는 기준선보다 나쁩니다.** 예측 구간(하위~상위 25%)의 실측 포함률도 명목 50%보다 낮아 구간이 좁게 잡히는 경향이 있습니다. 상세는 `reports/backtest_*.md`.
+
+## 한계
+
+- 사건 수(21건)가 적어 통계적 검정력이 낮습니다.
+- 대체자산은 상장 프록시로, 연기금형의 국내채권은 원/달러 환율 효과만 반영하는 프록시로 평가합니다.
+- Yahoo 시세는 비공식 엔드포인트입니다. 원시 데이터는 저장소에 포함하지 않고 각자 내려받습니다.
+- FRED 이용약관(AI/ML 개발·학습 관련 이용 금지)을 고려해 FRED 원시 시계열은 LLM에 입력하지 않고, 계산된 시나리오 통계만 브리프 작성에 전달합니다. 이 해석이 약관에 부합하는지는 추가 확인이 필요합니다.
+
+## 데이터 출처
+
+FRED(St. Louis Fed), Yahoo Finance, Caldara & Iacoviello Geopolitical Risk Index (https://www.matteoiacoviello.com/gpr.htm), The GDELT Project. 수집 시각과 이용 조건은 앱의 "데이터·출처" 탭과 `data/cache/manifest.json`에 기록됩니다.

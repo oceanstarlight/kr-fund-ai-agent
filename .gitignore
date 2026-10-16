@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+# Raw market data is fetched locally (python scripts/build_snapshot.py) and not redistributed.
+data/cache/
+.streamlit/secrets.toml
