@@ -61,3 +61,11 @@ def test_quality_failures_become_digit_free_unknowns(synthetic_md):
 def test_schema_table_documents_rules():
     t = quality.schema_table()
     assert {"stale", "spike_reversal", "has_columns"} <= set(t["검사"])
+
+
+def test_tools_tolerate_market_data_without_quality(synthetic_md):
+    """Objects cached by older code (no ``quality`` attribute) must not break analysis."""
+    md = MarketData(synthetic_md.prices, synthetic_md.factors, None, synthetic_md.inception)
+    del md.quality
+    res = estimate_sensitivities(ToolContext(md, {"SPY": 1.0}, pd.Timestamp("2015-01-02")))
+    assert not any(u.code.startswith("data_quality") for u in res.unknowns)

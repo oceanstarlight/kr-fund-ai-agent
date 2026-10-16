@@ -128,7 +128,7 @@ def build_scenario(ctx: ToolContext, analogs: list, horizons=config.HORIZONS) ->
 
 def _quality_unknowns(ctx: ToolContext) -> list[Unknown]:
     """Data-quality failures on the portfolio's assets or the factors, visible at ``base``."""
-    rel = [f for f in ctx.md.quality
+    rel = [f for f in getattr(ctx.md, "quality", [])
            if (f.source != "yahoo" or f.key in ctx.weights) and f.relevant_at(ctx.base)]
     out = []
     for sev, code, msg in [("error", "data_quality_error", "데이터 품질 검사에서 오류가 난 시계열이 있어 해당 값의 신뢰도가 낮음"),

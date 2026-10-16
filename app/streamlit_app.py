@@ -5,6 +5,7 @@ Run: streamlit run app/streamlit_app.py
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import sys
 from pathlib import Path
@@ -35,8 +36,13 @@ INK, INK2 = "#0b0b0b", "#52514e"
 st.set_page_config(page_title="MACRO SENTINEL", layout="wide")
 
 
+# Cached objects survive code updates on Streamlit Cloud (the process is not restarted), so the
+# cache key carries the class layout: adding a field invalidates objects built by older code.
+DATA_LAYOUT = tuple(f.name for f in dataclasses.fields(MarketData))
+
+
 @st.cache_resource(show_spinner="시장 데이터 불러오는 중...")
-def get_data(offline: bool) -> MarketData:
+def get_data(offline: bool, layout: tuple = DATA_LAYOUT) -> MarketData:
     return MarketData.load(offline=offline, max_age_hours=None if offline else 24)
 
 
@@ -84,11 +90,12 @@ if md.problems:
     with st.sidebar.expander(f"데이터 경고 {len(md.problems)}건" + (f" (실패 {len(failed)})" if failed else ""), expanded=bool(failed)):
         st.dataframe(report_frame(md.problems), hide_index=True)
         st.caption("실패한 항목은 제외하고 분석을 계속합니다. 대체 데이터는 최신이 아닐 수 있어요.")
-q_err = [f for f in md.quality if f.severity == "error"]
-if md.quality:
-    with st.sidebar.expander(f"데이터 품질 검사 {len(md.quality)}건" + (f" (오류 {len(q_err)})" if q_err else ""),
+quality_fails = getattr(md, "quality", [])
+q_err = [f for f in quality_fails if f.severity == "error"]
+if quality_fails:
+    with st.sidebar.expander(f"데이터 품질 검사 {len(quality_fails)}건" + (f" (오류 {len(q_err)})" if q_err else ""),
                              expanded=bool(q_err)):
-        st.dataframe(pd.DataFrame([f.as_row() for f in md.quality]), hide_index=True)
+        st.dataframe(pd.DataFrame([f.as_row() for f in quality_fails]), hide_index=True)
         st.caption("검사 결과는 분석 근거의 한계(unknowns)에 반영돼요. 데이터는 수정하지 않아요.")
 st.sidebar.caption(f"데이터 기준일: {md.last_date.date()}")
 
@@ -289,7 +296,7 @@ def render_result(state: dict) -> None:
 # ------------------------------------------------------------------------ tabs
 # ------------------------------------------------------------------- live map
 @st.cache_resource(show_spinner=False)
-def live_tracker() -> LiveTracker:
+def live_tracker(layout: str = LiveTracker.LAYOUT) -> LiveTracker:
     return LiveTracker()  # one GDELT history per app process, shared by all sessions
 
 
@@ -453,8 +460,8 @@ with tab_data:
     st.subheader("데이터 품질 검사 규칙")
     st.caption("수집할 때마다 모든 규칙을 끝까지 검사하고(첫 실패에서 멈추지 않음), 실패 건수와 예시 날짜를 기록해요. "
                "`sentinel/data/quality.py`")
-    if md.quality:
-        st.dataframe(pd.DataFrame([f.as_row() for f in md.quality]), hide_index=True)
+    if quality_fails:
+        st.dataframe(pd.DataFrame([f.as_row() for f in quality_fails]), hide_index=True)
     else:
         st.success("모든 품질 검사 통과")
     with st.expander("선언된 검사 규칙 전체"):
