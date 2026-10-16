@@ -26,17 +26,18 @@ def synthetic_md() -> MarketData:
     days = pd.bdate_range("2004-01-01", "2026-06-30")
     n = len(days)
     f_shocks = {k: rng.normal(0, 0.01, n) for k in FACTORS}
-    factors = {}
+    raw_factors = {}
     for k, f in FACTORS.items():
+        if f.source == "derived":
+            continue  # computed from prices inside MarketData.from_raw
         if f.transform == "logret":
-            factors[f.fred_id] = pd.Series(100 * np.exp(np.cumsum(f_shocks[k])), index=days)
+            raw_factors[k] = pd.Series(100 * np.exp(np.cumsum(f_shocks[k])), index=days)
         else:
-            factors[f.fred_id] = pd.Series(3 + np.cumsum(f_shocks[k]) * 0.1, index=days)
+            raw_factors[k] = pd.Series(3 + np.cumsum(f_shocks[k]) * 0.1, index=days)
     # Assets load on factors with known betas plus noise.
     prices = {}
     for i, t in enumerate(a for a in ASSETS if not ASSETS[a].synthetic):
         beta_oil = 0.1 * ((i % 3) - 1)
         r = beta_oil * f_shocks["oil"] - 0.2 * f_shocks["vix"] + rng.normal(0, 0.005, n)
         prices[t] = pd.Series(100 * np.cumprod(1 + r), index=days)
-    raw_factors = {k: factors[f.fred_id] for k, f in FACTORS.items()}
     return MarketData.from_raw(prices, raw_factors, None)

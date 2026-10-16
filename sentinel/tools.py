@@ -75,7 +75,7 @@ TOOL_CATALOG = {
 # ------------------------------------------------------------------------------ tools
 def detect_signals(md: MarketData, session: pd.Timestamp, event_date: pd.Timestamp | None = None) -> ToolResult:
     det = detect(md.truncate(session), session, event_date)
-    ev = [f"시장 데이터 {session.date()} 종가", "FRED 팩터 6종, 감시 자산 4종"]
+    ev = [f"시장 데이터 {session.date()} 종가", f"팩터 {len(md.factors.columns)}종(EIA·연준·Cboe·ETF 파생), 감시 자산 4종"]
     unk = []
     if md.gpr is None:
         unk.append(Unknown("gpr_missing", "지정학 리스크 지수 데이터가 없어 시장 신호만 사용"))

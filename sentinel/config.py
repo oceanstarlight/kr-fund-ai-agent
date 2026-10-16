@@ -74,4 +74,5 @@ SENTINEL_LOOKBACK_DAYS = 252
 
 # HTTP.
 HTTP_TIMEOUT = 30
-BROWSER_USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+# Yahoo answers 429 to many full browser UA strings but accepts the bare token (checked 2026-10).
+BROWSER_USER_AGENT = "Mozilla/5.0"

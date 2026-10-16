@@ -24,6 +24,9 @@ def weighted_quantile(values, weights, q: float) -> float:
 
 
 def quantiles(values, weights) -> dict[str, float]:
+    v = np.asarray(values, dtype=float)
+    if v.size == 0 or np.isnan(v).all():  # e.g. a factor whose source failed
+        return {k: float("nan") for k in ("q25", "q50", "q75", "min", "max")}
     return {
         "q25": weighted_quantile(values, weights, 0.25),
         "q50": weighted_quantile(values, weights, 0.50),

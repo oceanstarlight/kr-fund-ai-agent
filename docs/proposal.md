@@ -18,7 +18,7 @@
 | **핵심 기능** | 상시 감시(Monitor) → 사건 분석(Analyze) → 영향 추정(Impact) → 교차 검증(Verify) → 브리프·알림(Brief) → 실측 추적·보정(Track & Calibrate) + 질의응답(Ask) + 과거 사건 재현(Replay) |
 | **차별점** | ① LLM은 판단·설명만, **모든 숫자는 검증된 Python 정량 엔진이 산출** ② 독립된 두 엔진(팩터 모델 / 과거 사건 재현)의 **교차 검증 루프** ③ **예측 → 실측 → 보정** 자기학습 루프와 공개 성적표(Track Record) |
 | **Agent 구성** | LangGraph 기반 8개 전문 Agent, 13개 Tool, 조건 분기 및 재분석 루프, Human-in-the-loop |
-| **데이터** | GDELT, GPR Index, FRED, 한국은행 ECOS, SEC EDGAR, OpenDART, 시세 API, 공개 정책문서 (전부 공개·적법 데이터) |
+| **데이터** | GDELT, GPR Index, EIA·연준(H.10·H.15)·Cboe, 한국은행 ECOS, SEC EDGAR, OpenDART, 시세 API, 공개 정책문서 (전부 공개·적법 데이터) |
 | **MVP** | Streamlit 웹앱 + GitHub Actions 주기 감시 + 백테스트 리포트, 운영비 월 3만 원 이내 목표 |
 | **목표 지표** | 사건 감지 → 브리프 생성 30분 이내, 과거 사건 백테스트 방향 적중률·오차(MAE) 공개 `[기입]` |
 
@@ -173,7 +173,7 @@ flowchart TD
 |---|---|---|
 | `gdelt_query` | 키워드·국가별 뉴스량, 논조(tone) 시계열 | GDELT DOC 2.0 API |
 | `news_search` | 사건 관련 기사 제목·출처 검색 | Tavily Search API |
-| `market_snapshot` | 유가, VIX, 달러, 금리, 환율 등 최신값 | 시세 API + FRED |
+| `market_snapshot` | 유가, VIX, 달러, 금리, 환율 등 최신값 | 시세 API + EIA·연준·Cboe |
 | `anomaly_detect` | 롤링 z-score, 변화점 탐지 | Python (numpy, ruptures) |
 | `event_library_search` | 과거 사건 라이브러리 유사도 검색 | 임베딩 + 메타데이터 필터 (ChromaDB) |
 | `factor_history` | 팩터 시계열 조회 | 캐시 DB |
@@ -214,7 +214,7 @@ flowchart TD
 | 글로벌 뉴스량·논조 | GDELT Project | 15분 | 무료 API | 무제한·무제약 이용 표방, 인용 표기 `[확인: gdeltproject.org/about 원문]` | 사건 감지 |
 | 기사 검색 | Tavily Search API | 수시 | 무료 할당량 | 약관 `[확인]` | 사건 맥락·인용 |
 | 지정학 리스크 지수 | Caldara & Iacoviello GPR Index (일간 GPRD) | 일 (2~3일 지연, 2026-10 확인) | 무료 다운로드 | 인용 + 다운로드일 명시 | Sentinel 감지(주말 사건 포함)·백테스트 |
-| 미국 매크로·시장 지표 | FRED (St. Louis Fed) | 일·월 | 무료 API 키 | 출처 표기, 시리즈별 저작권 고지 유지, **AI·ML 개발/학습 이용 금지 조항** 있음 → 원시 데이터는 Python 계산에만 사용, LLM 학습·대량 다운로드 금지 | 팩터 |
+| 미국 매크로·시장 지표 | U.S. EIA(브렌트유), 연준 H.10(달러지수·원달러)·H.15(10년물), Cboe(VIX) | 일 | 무료 다운로드 | 미국 정부 공공 데이터(EIA·연준), Cboe는 재배포 조건 `[확인]` | 팩터 |
 | 국내 매크로·환율 | 한국은행 ECOS | 일·월 | 무료 API 키 | 공공데이터 | 팩터 |
 | 자산 가격 | 시세 API (Tiingo/Alpha Vantage 등) + 초기 스냅샷 | 일 | 무료 tier | 비상업 이용 조건 `[확인]` | 민감도·실측 |
 | 미국 기업 재무 | SEC EDGAR | 분기 | 무료 (User-Agent 필수) | 공공 | Drill-down |

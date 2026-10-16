@@ -49,21 +49,24 @@ ASSETS: dict[str, Asset] = {
 @dataclass(frozen=True)
 class Factor:
     key: str
-    fred_id: str
+    source: str  # "eia" | "fed" | "cboe" | "derived"
+    source_id: str
     name: str
     transform: str  # "logret" or "diff"
     unit: str
 
 
+# Primary (official) sources instead of FRED, whose terms restrict AI/ML-related use.
+# The credit factor is derived from ETF prices (Moody's Baa yields are licensed data).
 FACTORS: dict[str, Factor] = {
     f.key: f
     for f in [
-        Factor("oil", "DCOILBRENTEU", "브렌트유", "logret", "%"),
-        Factor("usd", "DTWEXBGS", "달러 지수(광의)", "logret", "%"),
-        Factor("us10y", "DGS10", "미 10년물 금리", "diff", "%p"),
-        Factor("credit", "BAA10Y", "신용 스프레드(Baa-10Y)", "diff", "%p"),
-        Factor("vix", "VIXCLS", "VIX", "diff", "pt"),
-        Factor("krw", "DEXKOUS", "원/달러 환율", "logret", "%"),
+        Factor("oil", "eia", "RBRTE", "브렌트유", "logret", "%"),
+        Factor("usd", "fed", "JRXWTFB_N.B", "달러 지수(광의)", "logret", "%"),
+        Factor("us10y", "fed", "RIFLGFCY10_N.B", "미 10년물 금리", "diff", "%p"),
+        Factor("credit", "derived", "IEF/HYG", "신용 스트레스(국채 대비 하이일드 약세)", "logret", "%"),
+        Factor("vix", "cboe", "VIX", "VIX", "diff", "pt"),
+        Factor("krw", "fed", "RXI_N.B.KO", "원/달러 환율", "logret", "%"),
     ]
 }
 FACTOR_KEYS = list(FACTORS)

@@ -44,6 +44,8 @@ def market_signals(md: MarketData, session: pd.Timestamp) -> list[Signal]:
     session = pd.Timestamp(session)
     out = []
     for k, f in FACTORS.items():
+        if k not in md.factors:
+            continue
         lv = md.factors[k]
         chg = np.log(lv / lv.shift(1)) if f.transform == "logret" else lv.diff()
         v, z = _z(chg, session, config.SENTINEL_LOOKBACK_DAYS)
