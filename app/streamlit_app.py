@@ -191,12 +191,16 @@ def render_result(state: dict) -> None:
         return
     h = config.PRIMARY_HORIZON
     p = state["impacts"][h]
-    real = (state.get("realized") or {}).get(h)
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric(f"D+{h} 예상 영향 (통합 중앙값)", pct(p.blend["q50"]))
-    k2.metric("불리 시나리오 (하위 25%)", pct(p.blend["q25"]))
-    k3.metric(f"D+{h} 실측", pct(real["realized"]) if real else "미확정")
-    k4.metric("검증 등급", state["verification"]["grade"])
+    # One column per horizon: expected (blend median), adverse (lower quartile), realized.
+    hs = list(state["impacts"])
+    cols = st.columns(len(hs) + 1)
+    realized_all = state.get("realized") or {}
+    for col, hh in zip(cols, hs):
+        ph = state["impacts"][hh]
+        rh = realized_all.get(hh)
+        col.metric(f"D+{hh} 예상 영향" + (" (참고용)" if hh == 20 else ""), pct(ph.blend["q50"]))
+        col.caption(f"불리 {pct(ph.blend['q25'])} · 실측 {pct(rh['realized']) if rh else '미확정'}")
+    cols[-1].metric("검증 등급", state["verification"]["grade"])
 
     with st.expander("Agent 실행 경로 (파이프라인 트레이스)", expanded=True):
         render_trace(state)
