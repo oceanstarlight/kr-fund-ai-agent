@@ -47,7 +47,13 @@ PRIMARY_HORIZON = 5
 # Factor sensitivity estimation.
 BETA_WINDOW_WEEKS = 156
 BETA_MIN_WEEKS = 52
-RIDGE_ALPHA = 0.1  # penalty on the standardized (correlation) scale
+# Ridge penalty on the standardized (correlation) scale: a number, or "cv" to pick it per
+# asset by leave-one-out error over RIDGE_ALPHAS (efficient closed form, like sklearn RidgeCV).
+# Backtest (21 events, 3 presets): CV mostly picks weaker penalties (0.01-0.03) and leaves MAE
+# unchanged within noise (D+1 slightly worse, D+5 mixed), so the fixed 0.1 stays the default.
+_ridge_env = os.environ.get("SENTINEL_RIDGE_ALPHA", "0.1")
+RIDGE_ALPHA: float | str = _ridge_env if _ridge_env == "cv" else float(_ridge_env)
+RIDGE_ALPHAS = tuple(float(a) for a in (0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0))
 
 # Volatility regime scaling and prediction intervals: "garch" (arch GARCH(1,1) forecast)
 # or the simple versions ("realized" 60-day vol, "analog" spread across analogs).

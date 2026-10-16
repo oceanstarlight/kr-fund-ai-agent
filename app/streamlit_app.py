@@ -20,6 +20,7 @@ from sentinel.agents.llm import llm_available, models, provider  # noqa: E402
 from sentinel.agents.pipeline import run  # noqa: E402
 from sentinel.backtest import run_backtest, summarize  # noqa: E402
 from sentinel.data.cache import cache_exists, load_manifest  # noqa: E402
+from sentinel.data.quality import schema_table  # noqa: E402
 from sentinel.data.store import DataUnavailable, MarketData  # noqa: E402
 from sentinel.data.universe import ASSETS, FACTORS, PRESETS, normalize  # noqa: E402
 from sentinel.events.library import load_events  # noqa: E402
@@ -81,6 +82,12 @@ if md.problems:
     with st.sidebar.expander(f"데이터 경고 {len(md.problems)}건" + (f" (실패 {len(failed)})" if failed else ""), expanded=bool(failed)):
         st.dataframe(report_frame(md.problems), hide_index=True)
         st.caption("실패한 항목은 제외하고 분석을 계속합니다. 대체 데이터는 최신이 아닐 수 있어요.")
+q_err = [f for f in md.quality if f.severity == "error"]
+if md.quality:
+    with st.sidebar.expander(f"데이터 품질 검사 {len(md.quality)}건" + (f" (오류 {len(q_err)})" if q_err else ""),
+                             expanded=bool(q_err)):
+        st.dataframe(pd.DataFrame([f.as_row() for f in md.quality]), hide_index=True)
+        st.caption("검사 결과는 분석 근거의 한계(unknowns)에 반영돼요. 데이터는 수정하지 않아요.")
 st.sidebar.caption(f"데이터 기준일: {md.last_date.date()}")
 
 preset_key = st.sidebar.selectbox(
@@ -326,3 +333,12 @@ with tab_data:
         "- 대체자산·일부 ETF는 상장 이전 기간을 문서화된 프록시로 보완함 (`sentinel/data/universe.py`의 backfill)\n"
         "- 이벤트 라이브러리: `sentinel/events/events.json` (t0 = 시장이 처음 반응할 수 있었던 미국 거래일)"
     )
+    st.subheader("데이터 품질 검사 규칙")
+    st.caption("수집할 때마다 모든 규칙을 끝까지 검사하고(첫 실패에서 멈추지 않음), 실패 건수와 예시 날짜를 기록해요. "
+               "`sentinel/data/quality.py`")
+    if md.quality:
+        st.dataframe(pd.DataFrame([f.as_row() for f in md.quality]), hide_index=True)
+    else:
+        st.success("모든 품질 검사 통과")
+    with st.expander("선언된 검사 규칙 전체"):
+        st.dataframe(schema_table(), hide_index=True)

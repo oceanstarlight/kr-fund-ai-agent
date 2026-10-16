@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from sentinel.data import cache
+from sentinel.data import cache, quality
 from sentinel.data.universe import ASSETS, FACTORS
 
 CALENDAR_TICKER = "SPY"
@@ -29,6 +29,7 @@ class MarketData:
     gpr: pd.DataFrame | None = None  # daily GPR (calendar days)
     inception: dict[str, pd.Timestamp] = field(default_factory=dict)
     report: list = field(default_factory=list)  # cache.SeriesStatus per source series
+    quality: list = field(default_factory=list)  # quality.Failure per broken rule (raw series)
 
     @property
     def calendar(self) -> pd.DatetimeIndex:
@@ -83,6 +84,8 @@ class MarketData:
             raise DataUnavailable(f"{CALENDAR_TICKER} price history is unavailable; cannot build the calendar", report)
         md = cls.from_raw(raw, fac, gpr)
         md.report = report
+        # Validate the raw series as fetched; failures are reported, never raised.
+        md.quality = quality.validate_all(raw, fac, gpr)
         return md
 
     @classmethod
