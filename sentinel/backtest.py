@@ -36,7 +36,7 @@ def _replay_one(args) -> list[dict]:
             continue
         rows.append(
             {
-                "event": ev.id, "name": ev.name, "t0": ev.t0.date(), "horizon": h,
+                "event": ev.id, "name": ev.name, "t0": ev.t0.date(), "horizon": h, "selection": ev.selection,
                 "n_analogs": p.n_analogs, "grade": st["verification"]["grade"],
                 "detected": st["detection"]["triggered"],
                 "pred_a": p.engine_a["q50"], "pred_b": p.engine_b["q50"], "pred": p.blend["q50"],
@@ -111,10 +111,36 @@ def _spearman(a: pd.Series, b: pd.Series) -> float:
     return float(a.rank().corr(b.rank()))
 
 
+BOOT_N = 2000
+BOOT_LEVEL = 0.90
+
+
+def bootstrap_skill(err: np.ndarray, base_err: np.ndarray, n: int = BOOT_N, seed: int = 0) -> tuple[float, float]:
+    """Percentile interval of 1 - mean(err)/mean(base_err), resampling events with replacement.
+
+    Events are the unit of resampling (the model and the baseline are scored on the same draw),
+    so the interval reflects how much the skill depends on which events happen to be in the library.
+    """
+    err, base_err = np.asarray(err, float), np.asarray(base_err, float)
+    ok = np.isfinite(err) & np.isfinite(base_err)
+    err, base_err = err[ok], base_err[ok]
+    if len(err) < 5:
+        return float("nan"), float("nan")
+    idx = np.random.default_rng(seed).integers(0, len(err), size=(n, len(err)))
+    den = base_err[idx].mean(axis=1)
+    skill = 1 - err[idx].mean(axis=1) / np.where(den > 0, den, np.nan)
+    a = (1 - BOOT_LEVEL) / 2
+    return float(np.nanquantile(skill, a)), float(np.nanquantile(skill, 1 - a))
+
+
 def summarize(df: pd.DataFrame) -> pd.DataFrame:
     out = []
     for h, g in df.groupby("horizon"):
         err = (g["pred"] - g["realized"]).abs()
+        zero_err = g["realized"].abs()
+        shock_err = (g["shock_baseline"] - g["realized"]).abs()
+        z_lo, z_hi = bootstrap_skill(err.to_numpy(), zero_err.to_numpy())
+        s_lo, s_hi = bootstrap_skill(err.to_numpy(), shock_err.to_numpy())
         out.append(
             {
                 "horizon": f"D+{h}",
@@ -127,7 +153,12 @@ def summarize(df: pd.DataFrame) -> pd.DataFrame:
                 "mae_shock_baseline": float((g["shock_baseline"] - g["realized"]).abs().mean()),
                 "direction_hit_shock_baseline": float(((g["shock_baseline"] >= 0) == (g["realized"] >= 0)).mean()),
                 "share_negative": float((g["realized"] < 0).mean()),
-                "skill_vs_zero": float(1 - err.mean() / g["realized"].abs().mean()) if g["realized"].abs().mean() else np.nan,
+                "skill_vs_zero": float(1 - err.mean() / zero_err.mean()) if zero_err.mean() else np.nan,
+                "skill_vs_zero_lo": z_lo,
+                "skill_vs_zero_hi": z_hi,
+                "skill_vs_shock": float(1 - err.mean() / shock_err.mean()) if shock_err.mean() else np.nan,
+                "skill_vs_shock_lo": s_lo,
+                "skill_vs_shock_hi": s_hi,
                 "iqr_coverage": float(((g["realized"] >= g["q25"]) & (g["realized"] <= g["q75"])).mean()),
                 "rank_corr": _spearman(g["pred"], g["realized"]),
                 "detected_rate": float(g["detected"].mean()),
@@ -147,19 +178,32 @@ def to_markdown(
         "- 기준선: '변화 없음(0%)' 예측. skill_vs_zero > 0 이면 기준선보다 오차가 작음",
         "- 충격 기준선: 과거 라이브러리 사건 전체의 실측 중앙값(유사도·변동성 보정 없음). 이 기준선과 비교해야 '충격 사건은 대체로 하락' 이상의 사건별 판별력을 볼 수 있음",
         "- iqr_coverage: 실측이 예측 구간(하위 25%~상위 25%) 안에 들어온 비율. 잘 보정된 경우 약 50%",
-        "- 주의: 사건 라이브러리는 사후적으로 '시장에 영향을 준 사건'을 골라 만든 것이라 선택 편향이 있음. 사건 수가 적고 일부 기간이 겹침",
+        f"- 개선율 괄호: 사건 단위 부트스트랩 {BOOT_LEVEL:.0%} 신뢰구간({BOOT_N}회 재표본). 구간이 0을 넘으면 기준선보다 낫다고 말할 수 있음",
+        "- 선정 경로: curated(초기 사후 선별), gpr_spike(GPR 급등 규칙), official(공식 발표). 규칙 기반 사건만의 결과가 선택 편향을 뺀 성능에 가까움",
         "",
         "## 요약",
-        "| 기간 | 사건 수 | 실측 하락 비율 | 방향 적중 | 방향 적중(충격 기준선) | MAE(통합) | MAE(엔진A) | MAE(엔진B) | MAE(0% 기준선) | MAE(충격 기준선) | 0% 기준선 대비 개선 | 구간 포함률 | 순위상관 | 감지율 |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| 기간 | 사건 수 | 실측 하락 비율 | 방향 적중 | 방향 적중(충격 기준선) | MAE(통합) | MAE(엔진A) | MAE(엔진B) | MAE(0% 기준선) | MAE(충격 기준선) | 0% 기준선 대비 개선 | 충격 기준선 대비 개선 | 구간 포함률 | 순위상관 | 감지율 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
+    ci = lambda r, k: f"{r[k]:+.0%} ({r[k + '_lo']:+.0%} ~ {r[k + '_hi']:+.0%})"  # noqa: E731
     for _, r in summary.iterrows():
         lines.append(
             f"| {r['horizon']} | {r['events']} | {r['share_negative']:.0%} | {r['direction_hit']:.0%} | {r['direction_hit_shock_baseline']:.0%} "
             f"| {r['mae_blend']:.2%} | {r['mae_engine_a']:.2%} | {r['mae_engine_b']:.2%} | {r['mae_zero_baseline']:.2%} "
-            f"| {r['mae_shock_baseline']:.2%} | {r['skill_vs_zero']:+.0%} | {r['iqr_coverage']:.0%} "
+            f"| {r['mae_shock_baseline']:.2%} | {ci(r, 'skill_vs_zero')} | {ci(r, 'skill_vs_shock')} | {r['iqr_coverage']:.0%} "
             f"| {r['rank_corr']:+.2f} | {r['detected_rate']:.0%} |"
         )
+    if "selection" in detail:
+        lines += ["", "## 선정 경로별", "| 선정 경로 | 기간 | 사건 수 | MAE(통합) | MAE(0% 기준선) | 0% 기준선 대비 개선 | 충격 기준선 대비 개선 |",
+                  "|---|---|---|---|---|---|---|"]
+        groups = [("전체", detail), ("규칙 기반(gpr_spike+official)", detail[detail["selection"] != "curated"]),
+                  ("초기 선별(curated)", detail[detail["selection"] == "curated"])]
+        for label, sub in groups:
+            if sub.empty:
+                continue
+            for _, r in summarize(sub).iterrows():
+                lines.append(f"| {label} | {r['horizon']} | {r['events']} | {r['mae_blend']:.2%} | {r['mae_zero_baseline']:.2%} "
+                             f"| {ci(r, 'skill_vs_zero')} | {ci(r, 'skill_vs_shock')} |")
     if ablation is not None:
         lines += [
             "",
