@@ -126,10 +126,23 @@ def build_scenario(ctx: ToolContext, analogs: list, horizons=config.HORIZONS) ->
     return ToolResult("build_scenario", out, ev, unk)
 
 
+def _quality_unknowns(ctx: ToolContext) -> list[Unknown]:
+    """Data-quality failures on the portfolio's assets or the factors, visible at ``base``."""
+    rel = [f for f in ctx.md.quality
+           if (f.source != "yahoo" or f.key in ctx.weights) and f.relevant_at(ctx.base)]
+    out = []
+    for sev, code, msg in [("error", "data_quality_error", "데이터 품질 검사에서 오류가 난 시계열이 있어 해당 값의 신뢰도가 낮음"),
+                           ("warning", "data_quality_warning", "데이터 품질 검사에서 이상치 경고가 난 시계열이 있음")]:
+        hits = [f for f in rel if f.severity == sev]
+        if hits:
+            out.append(Unknown(code, msg, "; ".join(f"{f.key}:{f.check}" for f in hits)[:200]))
+    return out
+
+
 def estimate_sensitivities(ctx: ToolContext) -> ToolResult:
     b = betas_mod.estimate_betas(ctx.visible, ctx.base, list(ctx.weights))
     w = pd.Series(ctx.weights)
-    unk = []
+    unk = _quality_unknowns(ctx)
     low = b.r2[b.r2 < 0.1].index.intersection(w.index)
     if float(w[low].sum()) > 0.1:
         unk.append(Unknown("low_r2", "팩터모델 설명력이 낮은 자산의 비중이 큼", f"{', '.join(low)} (비중 {w[low].sum():.0%})"))
@@ -139,7 +152,12 @@ def estimate_sensitivities(ctx: ToolContext) -> ToolResult:
     bf = b.backfilled_share.reindex(w.index).fillna(0)
     if float((w * bf).sum()) > 0.05:
         unk.append(Unknown("proxy_in_betas", "민감도 추정 일부가 상장 이전 프록시 데이터에 기반함", f"{(w * bf).sum():.0%}"))
-    ev = [f"주간 수익률 최근 {config.BETA_WINDOW_WEEKS}주 (기준일 {ctx.base.date()} 이전), Ridge alpha {config.RIDGE_ALPHA}"]
+    if config.RIDGE_ALPHA == "cv":
+        a = b.alpha.reindex(w.index).dropna()
+        reg = f"Ridge alpha 자산별 교차검증(LOO) 선택, 중앙값 {a.median():g}" if len(a) else "Ridge alpha 교차검증"
+    else:
+        reg = f"Ridge alpha {config.RIDGE_ALPHA}"
+    ev = [f"주간 수익률 최근 {config.BETA_WINDOW_WEEKS}주 (기준일 {ctx.base.date()} 이전), {reg}"]
     return ToolResult("estimate_sensitivities", b, ev, unk)
 
 
