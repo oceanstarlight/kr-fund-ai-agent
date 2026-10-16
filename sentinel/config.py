@@ -6,6 +6,21 @@ import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def _load_dotenv(path: Path) -> None:
+    """Load KEY=VALUE lines from a local, git-ignored .env file (existing env vars win)."""
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+_load_dotenv(ROOT / ".env")
 DATA_DIR = ROOT / "data"
 CACHE_DIR = Path(os.environ.get("SENTINEL_CACHE_DIR", DATA_DIR / "cache"))
 REPORT_DIR = ROOT / "reports"
@@ -15,8 +30,8 @@ MANIFEST_PATH = CACHE_DIR / "manifest.json"
 # LLMs only classify free-text events and write the brief; they are called only after the
 # deterministic sentinel triggers (or a user asks), so per-event cost stays near zero.
 LLM_PROVIDER = os.environ.get("SENTINEL_LLM_PROVIDER", "auto")  # auto | gemini | anthropic | none
-GEMINI_MODEL_FAST = os.environ.get("SENTINEL_GEMINI_MODEL_FAST", "gemini-flash-lite-latest")
-GEMINI_MODEL_SMART = os.environ.get("SENTINEL_GEMINI_MODEL_SMART", "gemini-flash-latest")
+GEMINI_MODEL_FAST = os.environ.get("SENTINEL_GEMINI_MODEL_FAST", "gemini-3.5-flash-lite")
+GEMINI_MODEL_SMART = os.environ.get("SENTINEL_GEMINI_MODEL_SMART", "gemini-3.5-flash-lite")
 ANTHROPIC_MODEL_FAST = os.environ.get("SENTINEL_MODEL_FAST", "claude-haiku-5-5")
 ANTHROPIC_MODEL_SMART = os.environ.get("SENTINEL_MODEL_SMART", "claude-sonnet-5-5")
 

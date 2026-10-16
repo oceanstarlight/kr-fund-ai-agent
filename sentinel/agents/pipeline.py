@@ -273,14 +273,20 @@ def build_facts(state: State) -> dict[str, str]:
     return facts
 
 
-def template_brief(facts: dict[str, str], state: State) -> str:
+def summary_section(facts: dict[str, str]) -> str:
     h = config.PRIMARY_HORIZON
-    lines = [
+    return "\n".join([
         "### 요약",
         f"- 사건: **{facts['event_name']}**" + (f" ({facts['event_date']})" if "event_date" in facts else ""),
         f"- 예측 기준: {facts['base_date']} 종가까지의 데이터, 유사 과거 사건 {facts['n_analogs']}건",
         f"- D+{h} 포트폴리오 예상 영향: **{facts[f'port_q50_{h}d']}** (불리 시나리오 {facts[f'port_q25_{h}d']})",
-        "",
+    ])
+
+
+def data_sections(facts: dict[str, str], state: State) -> str:
+    """Numeric tables are always rendered by code, never by the LLM."""
+    h = config.PRIMARY_HORIZON
+    lines = [
         "### 예상 영향",
         "| 기간 | 기본(중앙값) | 불리(하위 25%) | 유리(상위 25%) | 엔진A | 엔진B | 과거 VaR95 |",
         "|---|---|---|---|---|---|---|",
@@ -303,27 +309,40 @@ def template_brief(facts: dict[str, str], state: State) -> str:
         "### 근거와 신뢰도",
         f"- 유사 사건: {facts['analog_names']}",
         f"- 검증 등급: **{facts['grade']}** (엔진 A 팩터모델 / 엔진 B 과거사건 재현 교차검증)",
-        "",
-        "### 유의사항",
-        "- 통계적 연관성에 기반한 추정이며 인과를 보장하지 않음. 투자 판단 보조용.",
-        "- 대체자산은 상장 프록시로 평가함.",
     ]
     return "\n".join(lines)
+
+
+CAVEATS = "\n".join([
+    "### 유의사항",
+    "- 통계적 연관성에 기반한 추정이며 인과를 보장하지 않음. 투자 판단 보조용.",
+    "- 대체자산은 상장 프록시로 평가함.",
+])
+
+
+def template_brief(facts: dict[str, str], state: State) -> str:
+    return "\n\n".join([summary_section(facts), data_sections(facts, state), CAVEATS])
 
 
 def brief_node(state: State) -> dict:
     facts = build_facts(state)
     context = {
-        "classification": state["classification"],
-        "verification": state["verification"]["checks"],
-        "mode": state["mode"],
+        "classification": {k: state["classification"].get(k) for k in ("type", "region", "channels")},
+        # Only names and pass/fail: numeric details would tempt the LLM to copy numbers.
+        "verification": [{"check": c["check"], "ok": c["ok"]} for c in state["verification"]["checks"]],
     }
-    text, problems = llm.write_brief_llm(facts, context)
-    if text is None:
+    narrative, problems = llm.write_brief_llm(facts, context)
+    if narrative is None:
         text, engine = template_brief(facts, state), "template"
-        why = "LLM 미사용" if problems == ["llm unavailable"] else f"LLM 결과 감사 실패 → 템플릿 대체 ({'; '.join(problems)})"
+        if problems == ["llm unavailable"]:
+            why = "LLM 미사용"
+        elif any("error" in p or "no text" in p for p in problems):
+            why = f"LLM 호출 실패 → 템플릿 대체 ({'; '.join(problems)})"
+        else:
+            why = f"LLM 결과 감사 실패 → 템플릿 대체 ({'; '.join(problems)})"
     else:
-        engine, why = "llm", f"LLM({llm.provider()}) 작성, 수치 감사 통과"
+        text = "\n\n".join([summary_section(facts), narrative, data_sections(facts, state), CAVEATS])
+        engine, why = "llm", f"LLM({llm.provider()}) 해설 작성, 수치 감사 통과"
     return {"facts": facts, "brief": text, "brief_engine": engine, **_step("brief", why)}
 
 

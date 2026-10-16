@@ -68,10 +68,33 @@ def _anthropic():
     return anthropic.Anthropic(max_retries=2, timeout=60.0)
 
 
+_GEMINI_CLIENTS: dict[str, object] = {}
+
+
+def _with_retry(fn, *args, attempts: int = 3, delay: float = 2.0):
+    """Retry transient provider errors (free tiers return 429/503 under load)."""
+    import time
+
+    for i in range(attempts):
+        try:
+            return fn(*args)
+        except Exception as exc:  # noqa: BLE001
+            transient = type(exc).__name__ in {"ServerError", "RateLimitError", "APIConnectionError",
+                                                "InternalServerError", "OverloadedError"} or "429" in str(exc)
+            if not transient or i == attempts - 1:
+                raise
+            time.sleep(delay * (2**i))
+
+
 def _gemini():
+    # Keep one client per key: a temporary client is closed when garbage-collected,
+    # which breaks the request it was created for.
     from google import genai
 
-    return genai.Client(api_key=os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
+    key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
+    if key not in _GEMINI_CLIENTS:
+        _GEMINI_CLIENTS[key] = genai.Client(api_key=key)
+    return _GEMINI_CLIENTS[key]
 
 
 # --------------------------------------------------------------------- classification
@@ -168,7 +191,7 @@ def classify_event(text: str) -> tuple[EventClassification, str]:
     if p == "none":
         return classify_rules(text), "rules"
     try:
-        out = _classify_gemini(text) if p == "gemini" else _classify_anthropic(text)
+        out = _with_retry(_classify_gemini if p == "gemini" else _classify_anthropic, text)
     except Exception as exc:  # network/API failure must not break the pipeline
         return classify_rules(text), f"rules ({p} error: {type(exc).__name__})"
     if out is None:
@@ -178,12 +201,17 @@ def classify_event(text: str) -> tuple[EventClassification, str]:
 
 # ---------------------------------------------------------------------------- brief
 BRIEF_SYSTEM = (
-    "You write a one-page Korean 'Impact Brief' for an institutional investor's risk team. "
-    "Rules: (1) Never write a number yourself. Every figure, date or count must be written as "
-    "a placeholder [[key]] using only keys from the provided FACTS. Horizon labels D+1, D+5, "
-    "D+20 are allowed as text. (2) Do not add facts that are not in FACTS or CONTEXT. "
-    "(3) Use Markdown with these sections: '### 요약', '### 예상 영향', '### 주요 기여 자산', "
-    "'### 근거와 신뢰도', '### 유의사항'. (4) Be concise, factual, no investment advice."
+    "You write the interpretation section of a Korean 'Impact Brief' for an institutional "
+    "investor's risk team. Tables with the numbers are added by code; you only explain them.\n"
+    "Rules:\n"
+    "1. Output exactly one Markdown section starting with '### 해석' and 3-5 bullet points.\n"
+    "2. Never type a digit. To mention a figure, write a placeholder [[key]] using only keys "
+    "from FACTS. Horizons may be written as D+1, D+5 or D+20. Do not write labels that contain "
+    "digits (no 'Q50', 'VaR95', '1위', '95%'); use words such as '기본 시나리오', '불리 시나리오', "
+    "'과거 위험가치'.\n"
+    "3. Do not add facts that are not in FACTS or CONTEXT. Explain which transmission channels "
+    "drive the result, which assets dominate the loss, and how much to trust it.\n"
+    "4. Be concise and factual. No investment advice."
 )
 
 _PLACEHOLDER = re.compile(r"\[\[([a-zA-Z0-9_]+)\]\]")
@@ -260,7 +288,7 @@ def write_brief_llm(facts: dict[str, str], context: dict) -> tuple[str | None, l
         return None, ["llm unavailable"]
     payload = json.dumps({"FACTS": facts, "CONTEXT": context}, ensure_ascii=False, indent=1)
     try:
-        raw = _brief_gemini(payload) if p == "gemini" else _brief_anthropic(payload)
+        raw = _with_retry(_brief_gemini if p == "gemini" else _brief_anthropic, payload)
     except Exception as exc:
         return None, [f"{p} error: {type(exc).__name__}"]
     if not raw:
