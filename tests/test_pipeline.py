@@ -3,6 +3,7 @@ import pandas as pd
 from sentinel.agents import llm
 from sentinel.agents.pipeline import run
 from sentinel.data.universe import PRESETS
+from sentinel.events.library import load_events
 
 
 def test_replay_runs_end_to_end(synthetic_md):
@@ -16,8 +17,9 @@ def test_replay_runs_end_to_end(synthetic_md):
 
 
 def test_verifier_retry_loop_is_bounded(synthetic_md):
-    # The earliest events have almost no eligible analogs, forcing retries.
-    st = run(synthetic_md, PRESETS["balanced"].weights, mode="replay", event_id="2011-fukushima")
+    # The earliest event inside the data has almost no eligible analogs, forcing retries.
+    first = next(e.id for e in load_events() if synthetic_md.trading_day_before(e.t0) is not None)
+    st = run(synthetic_md, PRESETS["balanced"].weights, mode="replay", event_id=first)
     nodes = [s["node"] for s in st["trace"]]
     assert nodes.count("planner") == st["verification"]["attempts"]
     assert nodes.count("planner") <= 3

@@ -96,8 +96,12 @@ def test_event_library_is_consistent():
     for e in events:
         assert isinstance(e, Event)
         assert e.t0 >= e.date - pd.Timedelta(days=1), e.id
-        assert (e.t0 - e.date).days <= 3, e.id
+        # Longer gaps only for documented market closures (e.g. NYSE shut after 9/11).
+        assert (e.t0 - e.date).days <= 3 or "closed" in e.note, e.id
         assert e.t0.dayofweek < 5, e.id
+        assert e.selection in ("curated", "gpr_spike", "official"), e.id
+        if e.selection == "gpr_spike":
+            assert "GPR spike" in e.note, e.id
 
 
 def test_ridge_cv_matches_brute_force_loo(monkeypatch):

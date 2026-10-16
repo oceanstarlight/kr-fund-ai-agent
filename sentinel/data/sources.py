@@ -86,10 +86,11 @@ def fetch_eia(series_id: str = "RBRTE") -> tuple[pd.Series, str]:
     return s.sort_index(), url
 
 
+# History from 1998 so that events from 2000 on have the two years of weekly data the betas need.
 _FED_PACKAGES = {  # series id -> (release, Data Download Program package id, first date)
     "JRXWTFB_N.B": ("H10", "122e3bcb627e8e53f1bf72a1a09cfb81", "2006-01-01"),  # nominal broad dollar
-    "RXI_N.B.KO": ("H10", "60f32914ab61dfab590e0e470153e3ae", "2000-01-01"),  # KRW per USD
-    "RIFLGFCY10_N.B": ("H15", "bf17364827e38702b42a58cf8eaa3f78", "2000-01-01"),  # 10y constant maturity
+    "RXI_N.B.KO": ("H10", "60f32914ab61dfab590e0e470153e3ae", "1998-01-01"),  # KRW per USD
+    "RIFLGFCY10_N.B": ("H15", "bf17364827e38702b42a58cf8eaa3f78", "1998-01-01"),  # 10y constant maturity
 }
 
 
@@ -124,7 +125,7 @@ def fetch_cboe(index: str = "VIX") -> tuple[pd.Series, str]:
     return s.sort_index(), url
 
 
-def fetch_yahoo(ticker: str, start: str = "2000-01-01") -> tuple[pd.Series, str]:
+def fetch_yahoo(ticker: str, start: str = "1998-01-01") -> tuple[pd.Series, str]:
     p1 = int(pd.Timestamp(start, tz="UTC").timestamp())
     p2 = int(time.time())
     url = (
