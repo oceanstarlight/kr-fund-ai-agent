@@ -24,6 +24,7 @@ from sentinel.events.library import find_analogs, load_events
 from sentinel.monitor import detect
 from sentinel.quant import betas as betas_mod
 from sentinel.quant.engines import HorizonImpact, portfolio_impact
+from sentinel.quant.reaction import detection_forecast
 from sentinel.quant.risk import historical_var
 from sentinel.quant.scenario import analog_eligibility, analog_windows, scenario_table
 
@@ -190,6 +191,20 @@ def compute_impact(
 def historical_risk(ctx: ToolContext, horizons=config.HORIZONS) -> ToolResult:
     risk = {h: historical_var(ctx.visible, ctx.weights, ctx.base, h) for h in horizons}
     return ToolResult("historical_risk", risk, ["최근 3년 중첩 구간 과거 시뮬레이션, 신뢰수준 95%"], [])
+
+
+def reaction_update(
+    md: MarketData, weights: dict[str, float], t0: pd.Timestamp, classification: dict, exclude_id: str | None = None,
+) -> ToolResult:
+    """Detection-time forecast of the remaining return, analogs re-weighted by first-day reaction."""
+    res = detection_forecast(md, weights, t0, classification, exclude_id)
+    if res is None:
+        return ToolResult("reaction_update", None, [], [Unknown("no_reaction", "첫날 반응 데이터가 아직 없음")])
+    ev = [f"첫 반응일 {res.detect.date()} 종가까지의 데이터",
+          f"유사 사건 {len(res.pool)}건의 첫날 팩터 반응을 관측과 비교해 가중"]
+    unk = [Unknown("reaction_vs_zero", "감지 시점 백테스트에서 기존 방식보다 오차가 작았지만 변화 없음 예측보다 낫다는 근거는 없음")]
+    unk += [Unknown("reaction_no_match", n) for n in res.notes]
+    return ToolResult("reaction_update", res, ev, unk)
 
 
 def unknowns_of(results: list[ToolResult]) -> list[Unknown]:
