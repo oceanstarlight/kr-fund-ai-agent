@@ -11,7 +11,7 @@
 
 | 구성 | 위치 | 내용 |
 |---|---|---|
-| 데이터 수집·캐시 | `sentinel/data/` | FRED, Yahoo 시세, GPR 일간 지수, GDELT. 캐시와 출처 manifest(출처, 수집 시각, 이용 조건, 전처리) |
+| 데이터 수집·캐시 | `sentinel/data/` | 팩터: EIA(브렌트유), 연준 H.10(달러지수·원달러)·H.15(10년물), Cboe(VIX), ETF 파생(신용). 시세: Yahoo. GPR 일간 지수, GDELT. 소스별 병렬 수집, 실패 시 저장소 스냅샷·오래된 캐시로 대체하고 실패 항목을 보고(앱은 계속 동작). 출처 manifest 기록 |
 | 사건 라이브러리 | `sentinel/events/events.json` | 2008~2025년 22개 사건 (유형, 지역, 전이 경로, 시장 반응 첫 거래일 t0) |
 | 정량 엔진 | `sentinel/quant/` | 엔진 A 팩터모델(주간 Ridge 회귀), 엔진 B 과거사건 재현, 변동성 국면 보정, GARCH 기반 예측 구간(`arch`), VaR/CVaR, 자산별 기여도 |
 | Sentinel | `sentinel/monitor.py` | 시장 변수 일간 z-score, GPR 지수 z-score 이상 감지 |
@@ -30,7 +30,7 @@
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
 
-python scripts/build_snapshot.py          # 데이터 수집 → data/cache (약 10초)
+python scripts/build_snapshot.py          # 데이터 수집 → data/cache (약 30초, 소스별 결과 출력)
 python scripts/run_backtest.py --offline  # 백테스트 → reports/
 streamlit run app/streamlit_app.py        # 대시보드
 python -m pytest -q                       # 테스트 (네트워크 불필요)
@@ -49,9 +49,9 @@ LLM 사용은 선택입니다. `GEMINI_API_KEY`(현재 기본) 또는 `ANTHROPIC
 
 | 기간 | 실측 하락 비율 | 방향 적중 | 방향 적중(충격 기준선) | MAE | MAE(0% 기준선) | MAE(충격 기준선) |
 |---|---|---|---|---|---|---|
-| D+1 | 86% | 86% | 86% | 1.08% | 1.31% | 1.39% |
-| D+5 | 67% | 67% | 62% | 1.57% | 1.73% | 1.70% |
-| D+20 | 57% | 48% | 57% | 3.72% | 2.23% | 3.71% |
+| D+1 | 86% | 86% | 86% | 1.10% | 1.31% | 1.39% |
+| D+5 | 67% | 76% | 62% | 1.59% | 1.73% | 1.70% |
+| D+20 | 57% | 48% | 57% | 3.86% | 2.23% | 3.71% |
 
 - 충격 기준선 = 과거 라이브러리 사건 전체의 실측 중앙값(유사도·변동성 보정 없음).
 - **방향 적중률은 기준선과 거의 같습니다.** 충격 사건은 대체로 하락하기 때문에 높은 적중률 자체는 판별력의 증거가 아닙니다.
@@ -63,9 +63,8 @@ LLM 사용은 선택입니다. `GEMINI_API_KEY`(현재 기본) 또는 `ANTHROPIC
 
 - 사건 수(21건)가 적고 일부 기간이 겹쳐 통계적 검정력이 낮습니다. 사건 라이브러리는 사후적으로 선별해 선택 편향이 있습니다.
 - 대체자산은 상장 프록시로, 연기금형의 국내채권은 원/달러 환율 효과만 반영하는 프록시로 평가합니다.
-- Yahoo 시세는 비공식 엔드포인트입니다. 원시 데이터는 저장소에 포함하지 않고 각자 내려받습니다.
-- FRED 이용약관(AI/ML 개발·학습 관련 이용 금지)을 고려해 FRED 원시 시계열은 LLM에 입력하지 않고, 계산된 시나리오 통계만 브리프 작성에 전달합니다. 이 해석이 약관에 부합하는지는 추가 확인이 필요합니다.
+- Yahoo 시세는 비공식 엔드포인트입니다. 시세는 저장소에 포함하지 않고 실행 시 수집합니다. 저장소에는 재배포 가능한 공공 데이터(EIA, 연준) 팩터 스냅샷(`data/snapshot`)만 포함해 수집 실패 시 대체합니다.
 
 ## 데이터 출처
 
-FRED(St. Louis Fed), Yahoo Finance, Caldara & Iacoviello Geopolitical Risk Index (https://www.matteoiacoviello.com/gpr.htm), The GDELT Project. 수집 시각과 이용 조건은 앱의 "데이터·출처" 탭과 `data/cache/manifest.json`에 기록됩니다.
+U.S. EIA, Federal Reserve Board(H.10, H.15), Cboe Global Markets, Yahoo Finance, Caldara & Iacoviello Geopolitical Risk Index (https://www.matteoiacoviello.com/gpr.htm), The GDELT Project. 수집 시각과 이용 조건은 앱의 "데이터·출처" 탭과 `data/cache/manifest.json`에 기록됩니다.

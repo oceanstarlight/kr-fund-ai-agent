@@ -78,7 +78,9 @@ def _step(node: str, summary: str, **extra) -> dict:
 def orchestrator(state: State) -> dict:
     md = state["md"]
     mode = state.get("mode", "replay")
-    weights = normalize(state["weights"])
+    weights, dropped = md.usable_weights(normalize(state["weights"]))
+    if not weights:
+        raise ValueError("포트폴리오 자산 중 가격 데이터가 있는 자산이 없음")
     horizons = tuple(state.get("horizons") or config.HORIZONS)
     out: dict = {"weights": weights, "horizons": horizons, "attempt": 0, "mode": mode, "tool_results": {}}
     if mode == "replay":
@@ -91,6 +93,8 @@ def orchestrator(state: State) -> dict:
         base = md.last_date
         out.update(event=None, session=base, base=base)
         msg = f"{'질의' if mode == 'ask' else '감시'} 모드: 최신 종가 {base.date()} 기준"
+    if dropped:
+        msg += f" / 가격 데이터 없음으로 제외 후 비중 재조정: {', '.join(dropped)}"
     return {**out, **_step("orchestrator", msg)}
 
 

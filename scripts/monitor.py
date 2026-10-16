@@ -112,6 +112,8 @@ def main() -> None:
 
     md, src = load_market()
     log.append(f"Market data: {src}" + (f", last session {md.last_date.date()}" if md else ""))
+    if md is not None and md.problems:
+        log.append("Data issues: " + "; ".join(f"{r.source}:{r.key} {r.origin} {r.error}".strip() for r in md.problems))
     market_trigger = None
     if md is not None and str(md.last_date.date()) != st.get("last_market_session"):
         det = market_monitor.detect(md, md.last_date)

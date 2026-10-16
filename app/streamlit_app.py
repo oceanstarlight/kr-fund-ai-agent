@@ -19,8 +19,8 @@ from sentinel import config  # noqa: E402
 from sentinel.agents.llm import llm_available, models, provider  # noqa: E402
 from sentinel.agents.pipeline import run  # noqa: E402
 from sentinel.backtest import run_backtest, summarize  # noqa: E402
-from sentinel.data.cache import load_manifest  # noqa: E402
-from sentinel.data.store import MarketData  # noqa: E402
+from sentinel.data.cache import cache_exists, load_manifest  # noqa: E402
+from sentinel.data.store import DataUnavailable, MarketData  # noqa: E402
 from sentinel.data.universe import ASSETS, FACTORS, PRESETS, normalize  # noqa: E402
 from sentinel.events.library import load_events  # noqa: E402
 
@@ -37,6 +37,15 @@ def get_data(offline: bool) -> MarketData:
     return MarketData.load(offline=offline, max_age_hours=None if offline else 24)
 
 
+def safe_run(label: str, fn, *args, **kwargs):
+    """Run an analysis without letting an exception take the app down."""
+    try:
+        return fn(*args, **kwargs)
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"{label} 중 오류가 나서 이번 실행을 건너뛰었어요: {type(exc).__name__}: {exc}")
+        return None
+
+
 def pct(x: float) -> str:
     return "-" if x != x else f"{x:+.2%}"
 
@@ -45,12 +54,33 @@ def pct(x: float) -> str:
 st.sidebar.title("MACRO SENTINEL")
 st.sidebar.caption("지정학·매크로 충격 감시 및 포트폴리오 영향 추정 Agent (프로토타입)")
 
-offline = st.sidebar.toggle("캐시 데이터만 사용 (오프라인)", value=True)
+ORIGIN_KO = {"cache": "캐시", "network": "온라인 수집", "snapshot": "저장소 스냅샷(대체)",
+             "stale-cache": "오래된 캐시(대체)", "failed": "실패"}
+
+
+def report_frame(report) -> pd.DataFrame:
+    return pd.DataFrame([{"소스": r.source, "항목": r.key, "결과": ORIGIN_KO.get(r.origin, r.origin), "오류": r.error}
+                         for r in report])
+
+
+# No local cache (e.g. a fresh Streamlit Cloud deploy) -> collect online by default.
+offline = st.sidebar.toggle("캐시 데이터만 사용 (오프라인)", value=cache_exists())
+if st.sidebar.button("데이터 새로 고침"):
+    get_data.clear()
 try:
     md = get_data(offline)
-except Exception as exc:  # noqa: BLE001
-    st.error(f"데이터를 불러오지 못했어요: {exc}\n\n`python scripts/build_snapshot.py` 로 캐시를 먼저 만들어 주세요.")
+except DataUnavailable as exc:
+    st.error("시장 데이터의 기준 자산(SPY)을 불러오지 못해 분석을 시작할 수 없어요. 잠시 후 '데이터 새로 고침'을 눌러 주세요.")
+    st.dataframe(report_frame(exc.report), hide_index=True)
     st.stop()
+except Exception as exc:  # noqa: BLE001
+    st.error(f"데이터를 불러오는 중 예상하지 못한 오류가 났어요: {type(exc).__name__}: {exc}")
+    st.stop()
+if md.problems:
+    failed = [r for r in md.problems if r.origin == "failed"]
+    with st.sidebar.expander(f"데이터 경고 {len(md.problems)}건" + (f" (실패 {len(failed)})" if failed else ""), expanded=bool(failed)):
+        st.dataframe(report_frame(md.problems), hide_index=True)
+        st.caption("실패한 항목은 제외하고 분석을 계속합니다. 대체 데이터는 최신이 아닐 수 있어요.")
 st.sidebar.caption(f"데이터 기준일: {md.last_date.date()}")
 
 preset_key = st.sidebar.selectbox(
@@ -226,7 +256,9 @@ with tab_replay:
     ev = next(e for e in events if e.id == ev_id)
     st.caption(f"{ev.description}" + (f"  \n※ {ev.note}" if ev.note else ""))
     if st.button("Replay 실행", type="primary"):
-        st.session_state["replay"] = {"key": run_key, "result": run(md, weights, mode="replay", event_id=ev_id, aum=aum, currency=currency)}
+        res = safe_run("Replay", run, md, weights, mode="replay", event_id=ev_id, aum=aum, currency=currency)
+        if res is not None:
+            st.session_state["replay"] = {"key": run_key, "result": res}
     rp = fresh("replay")
     if rp and rp.get("event") and rp["event"].id == ev_id:
         render_result(rp)
@@ -235,7 +267,9 @@ with tab_ask:
     st.write(f"최신 종가({md.last_date.date()}) 기준으로, 입력한 사건이 지금 일어났다고 가정하고 영향을 추정해요.")
     text = st.text_area("사건 설명 (한국어/영어)", placeholder="예: Iran closes the Strait of Hormuz after US strikes / 대만 해협 봉쇄")
     if st.button("분석", type="primary", disabled=not text.strip()):
-        st.session_state["ask"] = {"key": run_key, "result": run(md, weights, mode="ask", event_text=text, aum=aum, currency=currency)}
+        res = safe_run("분석", run, md, weights, mode="ask", event_text=text, aum=aum, currency=currency)
+        if res is not None:
+            st.session_state["ask"] = {"key": run_key, "result": res}
     ak = fresh("ask")
     if ak:
         cls = ak["classification"]
@@ -246,7 +280,9 @@ with tab_bt:
     st.write("사건 라이브러리 전체에 대한 Leave-one-out 백테스트 (사건 직전 데이터만 사용).")
     if st.button("현재 포트폴리오로 백테스트 실행"):
         with st.spinner("백테스트 실행 중..."):
-            st.session_state["bt"] = {"key": run_key, "result": run_backtest(md, weights)}
+            res = safe_run("백테스트", run_backtest, md, weights)
+            if res is not None:
+                st.session_state["bt"] = {"key": run_key, "result": res}
     bt = fresh("bt")
     if bt is None and preset_key in PRESETS and (config.REPORT_DIR / f"backtest_{preset_key}.csv").exists():
         bt = pd.read_csv(config.REPORT_DIR / f"backtest_{preset_key}.csv")

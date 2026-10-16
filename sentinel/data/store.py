@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -13,12 +14,21 @@ from sentinel.data.universe import ASSETS, FACTORS
 CALENDAR_TICKER = "SPY"
 
 
+class DataUnavailable(RuntimeError):
+    """Raised only when the trading calendar itself (SPY) cannot be loaded."""
+
+    def __init__(self, message: str, report: list | None = None):
+        super().__init__(message)
+        self.report = report or []
+
+
 @dataclass
 class MarketData:
     prices: pd.DataFrame  # total-return index levels on the trading calendar
     factors: pd.DataFrame  # factor levels on the trading calendar
     gpr: pd.DataFrame | None = None  # daily GPR (calendar days)
     inception: dict[str, pd.Timestamp] = field(default_factory=dict)
+    report: list = field(default_factory=list)  # cache.SeriesStatus per source series
 
     @property
     def calendar(self) -> pd.DatetimeIndex:
@@ -28,20 +38,52 @@ class MarketData:
     def last_date(self) -> pd.Timestamp:
         return self.calendar[-1]
 
+    @property
+    def problems(self) -> list:
+        """Series that failed or fell back to a snapshot/stale cache."""
+        return [r for r in self.report if r.origin in ("failed", "snapshot", "stale-cache")]
+
+    def usable_weights(self, weights: dict[str, float]) -> tuple[dict[str, float], list[str]]:
+        """Drop assets without price data and renormalize, so analysis can still run."""
+        ok = {t: w for t, w in weights.items() if t in self.prices and self.prices[t].notna().any()}
+        dropped = [t for t in weights if t not in ok]
+        total = sum(ok.values())
+        return ({t: w / total for t, w in ok.items()} if total > 0 else {}), dropped
+
     # ------------------------------------------------------------------ build
     @classmethod
     def load(cls, offline: bool = False, max_age_hours: float | None = 24) -> "MarketData":
-        raw = {}
-        for t, a in ASSETS.items():
-            if a.synthetic:
-                continue
-            raw[t] = cache.get_series("yahoo", t, max_age_hours, offline)
-        fac = {k: cache.get_series("fred", f.fred_id, max_age_hours, offline) for k, f in FACTORS.items()}
-        try:
-            gpr = cache.get_gpr(max_age_hours, offline)
-        except Exception:  # GPR is optional context for the sentinel
-            gpr = None
-        return cls.from_raw(raw, fac, gpr)
+        """Fetch all sources in parallel. A failing source is reported, not raised.
+
+        Yahoo requests stay sequential inside one worker (rate limit); the official factor
+        sources and the GPR file each run in their own worker.
+        """
+        tickers = [t for t, a in ASSETS.items() if not a.synthetic]
+
+        def yahoo_all():
+            return [(t, *cache.fetch_series("yahoo", t, max_age_hours, offline)) for t in tickers]
+
+        def factor(k):
+            f = FACTORS[k]
+            return (k, *cache.fetch_series(f.source, f.source_id, max_age_hours, offline))
+
+        fac_keys = [k for k, f in FACTORS.items() if f.source != "derived"]
+        with ThreadPoolExecutor(max_workers=len(fac_keys) + 2) as ex:
+            fut_y = ex.submit(yahoo_all)
+            fut_f = [ex.submit(factor, k) for k in fac_keys]
+            fut_g = ex.submit(cache.get_gpr, max_age_hours, offline)
+            y_res = fut_y.result()
+            f_res = [f.result() for f in fut_f]
+            gpr, gpr_status = fut_g.result()
+
+        report = [st for _, _, st in y_res] + [st for _, _, st in f_res] + [gpr_status]
+        raw = {t: s for t, s, _ in y_res if s is not None}
+        fac = {k: s for k, s, _ in f_res if s is not None}
+        if CALENDAR_TICKER not in raw:
+            raise DataUnavailable(f"{CALENDAR_TICKER} price history is unavailable; cannot build the calendar", report)
+        md = cls.from_raw(raw, fac, gpr)
+        md.report = report
+        return md
 
     @classmethod
     def from_raw(
@@ -94,6 +136,11 @@ class MarketData:
         # Keep NaN where neither the asset nor a proxy existed.
         prices = prices.where(ret_df.notna().cummax())
         factors = factors.loc[prices.index]
+        for k, f in FACTORS.items():
+            if f.source == "derived":
+                num, den = f.source_id.split("/")
+                if num in prices and den in prices:
+                    factors[k] = prices[num] / prices[den]
         return cls(prices=prices, factors=factors, gpr=gpr, inception=inception)
 
     # ---------------------------------------------------------------- helpers
