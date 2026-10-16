@@ -29,6 +29,8 @@ class LiveSnapshot:
 
 
 class LiveTracker:
+    LAYOUT = "1"  # bump when attributes change: the app caches one instance across code updates
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self.history = pd.DataFrame()
