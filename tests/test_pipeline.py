@@ -71,3 +71,31 @@ def test_backfill_keeps_nan_before_any_proxy_exists():
     md = MarketData.from_raw({"SPY": spy, "IEF": ief, "TLT": ief.copy()}, {}, None)
     # TLT backfills from IEF only, which did not exist yet: no fake flat prices.
     assert md.prices["TLT"].iloc[:4].isna().all()
+
+
+def test_provider_selection(monkeypatch):
+    monkeypatch.delenv("SENTINEL_DISABLE_LLM", raising=False)
+    for k in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        monkeypatch.delenv(k, raising=False)
+    assert llm.provider() == "none"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    assert llm.provider() == "anthropic"
+    monkeypatch.setenv("GEMINI_API_KEY", "y")
+    assert llm.provider() == "gemini"
+    monkeypatch.setattr("sentinel.config.LLM_PROVIDER", "anthropic")
+    assert llm.provider() == "anthropic"
+    monkeypatch.setenv("SENTINEL_DISABLE_LLM", "1")
+    assert llm.provider() == "none"
+
+
+def test_gemini_failure_falls_back_to_rules(monkeypatch):
+    monkeypatch.delenv("SENTINEL_DISABLE_LLM", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "invalid-key-for-test")
+
+    def boom(_text):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(llm, "_classify_gemini", boom)
+    c, engine = llm.classify_event("Iran missile strike on Israel")
+    assert engine.startswith("rules (gemini error")
+    assert c.region == "middle_east"

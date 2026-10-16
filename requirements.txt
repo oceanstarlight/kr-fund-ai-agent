@@ -1,4 +1,5 @@
 anthropic>=1.15
+google-genai>=2.0
 langgraph>=1.2
 pandas>=2.2
 numpy>=2.0

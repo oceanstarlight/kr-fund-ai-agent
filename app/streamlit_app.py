@@ -16,7 +16,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sentinel import config  # noqa: E402
-from sentinel.agents.llm import llm_available  # noqa: E402
+from sentinel.agents.llm import llm_available, models, provider  # noqa: E402
 from sentinel.agents.pipeline import run  # noqa: E402
 from sentinel.backtest import run_backtest, summarize  # noqa: E402
 from sentinel.data.cache import load_manifest  # noqa: E402
@@ -94,7 +94,7 @@ def fresh(name: str):
 
 
 st.sidebar.markdown(
-    f"**LLM**: {'연결됨 (분류 ' + config.MODEL_FAST + ', 브리프 ' + config.MODEL_SMART + ')' if llm_available() else '미연결 → 규칙 기반 분류 + 템플릿 브리프'}"
+    f"**LLM**: {provider() + ' (분류 ' + models()[0] + ', 브리프 ' + models()[1] + ')' if llm_available() else '미연결 → 규칙 기반 분류 + 템플릿 브리프'}"
 )
 
 

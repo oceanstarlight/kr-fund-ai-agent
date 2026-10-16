@@ -35,16 +35,43 @@ class EventClassification(BaseModel):
     rationale_ko: str = Field(description="1-2 Korean sentences on why these channels apply")
 
 
-def llm_available() -> bool:
+def provider() -> str:
+    """Active LLM provider: 'gemini', 'anthropic' or 'none'."""
     if os.environ.get("SENTINEL_DISABLE_LLM"):
-        return False
-    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+        return "none"
+    has_gemini = bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
+    has_anthropic = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+    choice = config.LLM_PROVIDER
+    if choice == "gemini":
+        return "gemini" if has_gemini else "none"
+    if choice == "anthropic":
+        return "anthropic" if has_anthropic else "none"
+    if choice == "none":
+        return "none"
+    return "gemini" if has_gemini else "anthropic" if has_anthropic else "none"
 
 
-def _client():
+def llm_available() -> bool:
+    return provider() != "none"
+
+
+def models() -> tuple[str, str]:
+    """(fast model for classification, smart model for the brief) of the active provider."""
+    if provider() == "gemini":
+        return config.GEMINI_MODEL_FAST, config.GEMINI_MODEL_SMART
+    return config.ANTHROPIC_MODEL_FAST, config.ANTHROPIC_MODEL_SMART
+
+
+def _anthropic():
     import anthropic
 
     return anthropic.Anthropic(max_retries=2, timeout=60.0)
+
+
+def _gemini():
+    from google import genai
+
+    return genai.Client(api_key=os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
 
 
 # --------------------------------------------------------------------- classification
@@ -103,23 +130,50 @@ def classify_rules(text: str) -> EventClassification:
     )
 
 
+def _classify_anthropic(text: str) -> EventClassification | None:
+    resp = _anthropic().messages.parse(
+        model=models()[0],
+        max_tokens=2048,
+        system=CLASSIFY_SYSTEM,
+        messages=[{"role": "user", "content": f"Event report:\n{text}"}],
+        output_format=EventClassification,
+    )
+    if resp.stop_reason == "refusal":
+        return None
+    return resp.parsed_output
+
+
+def _classify_gemini(text: str) -> EventClassification | None:
+    from google.genai import types
+
+    resp = _gemini().models.generate_content(
+        model=models()[0],
+        contents=f"Event report:\n{text}",
+        config=types.GenerateContentConfig(
+            system_instruction=CLASSIFY_SYSTEM,
+            response_mime_type="application/json",
+            response_schema=EventClassification,
+            max_output_tokens=1024,
+            temperature=0.0,
+        ),
+    )
+    if isinstance(resp.parsed, EventClassification):
+        return resp.parsed
+    return EventClassification.model_validate_json(resp.text) if resp.text else None
+
+
 def classify_event(text: str) -> tuple[EventClassification, str]:
-    """Returns (classification, engine) where engine is 'llm' or 'rules'."""
-    if not llm_available():
+    """Returns (classification, engine) where engine is 'llm:<provider>' or 'rules...'."""
+    p = provider()
+    if p == "none":
         return classify_rules(text), "rules"
     try:
-        resp = _client().messages.parse(
-            model=config.MODEL_FAST,
-            max_tokens=2048,
-            system=CLASSIFY_SYSTEM,
-            messages=[{"role": "user", "content": f"Event report:\n{text}"}],
-            output_format=EventClassification,
-        )
-        if resp.stop_reason == "refusal" or resp.parsed_output is None:
-            return classify_rules(text), f"rules (llm stop_reason={resp.stop_reason})"
-        return resp.parsed_output, "llm"
+        out = _classify_gemini(text) if p == "gemini" else _classify_anthropic(text)
     except Exception as exc:  # network/API failure must not break the pipeline
-        return classify_rules(text), f"rules (llm error: {type(exc).__name__})"
+        return classify_rules(text), f"rules ({p} error: {type(exc).__name__})"
+    if out is None:
+        return classify_rules(text), f"rules ({p} returned no result)"
+    return out, f"llm:{p}"
 
 
 # ---------------------------------------------------------------------------- brief
@@ -174,23 +228,43 @@ def fill_placeholders(raw: str, facts: dict[str, str]) -> str:
     return _PLACEHOLDER.sub(lambda m: facts.get(m.group(1), m.group(0)), raw)
 
 
+def _brief_anthropic(payload: str) -> str | None:
+    resp = _anthropic().messages.create(
+        model=models()[1],
+        max_tokens=4000,
+        system=BRIEF_SYSTEM,
+        messages=[{"role": "user", "content": payload}],
+    )
+    if resp.stop_reason == "refusal":
+        return None
+    return "".join(b.text for b in resp.content if b.type == "text")
+
+
+def _brief_gemini(payload: str) -> str | None:
+    from google.genai import types
+
+    resp = _gemini().models.generate_content(
+        model=models()[1],
+        contents=payload,
+        config=types.GenerateContentConfig(
+            system_instruction=BRIEF_SYSTEM, max_output_tokens=4000, temperature=0.2
+        ),
+    )
+    return resp.text
+
+
 def write_brief_llm(facts: dict[str, str], context: dict) -> tuple[str | None, list[str]]:
     """Returns (filled brief or None, audit problems)."""
-    if not llm_available():
+    p = provider()
+    if p == "none":
         return None, ["llm unavailable"]
     payload = json.dumps({"FACTS": facts, "CONTEXT": context}, ensure_ascii=False, indent=1)
     try:
-        resp = _client().messages.create(
-            model=config.MODEL_SMART,
-            max_tokens=4000,
-            system=BRIEF_SYSTEM,
-            messages=[{"role": "user", "content": payload}],
-        )
+        raw = _brief_gemini(payload) if p == "gemini" else _brief_anthropic(payload)
     except Exception as exc:
-        return None, [f"api error: {type(exc).__name__}"]
-    if resp.stop_reason == "refusal":
-        return None, ["refusal"]
-    raw = "".join(b.text for b in resp.content if b.type == "text")
+        return None, [f"{p} error: {type(exc).__name__}"]
+    if not raw:
+        return None, [f"{p} returned no text"]
     problems = audit_brief(raw, facts)
     if problems:
         return None, problems

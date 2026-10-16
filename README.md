@@ -15,7 +15,7 @@
 | 정량 엔진 | `sentinel/quant/` | 엔진 A 팩터모델(주간 Ridge 회귀), 엔진 B 과거사건 재현, 변동성 국면 보정, VaR/CVaR, 자산별 기여도 |
 | Sentinel | `sentinel/monitor.py` | 시장 변수 일간 z-score, GPR 지수 z-score 이상 감지 |
 | Agent 파이프라인 | `sentinel/agents/pipeline.py` | LangGraph: Orchestrator → Sentinel → Event Analyst → Scenario Builder → Quant Engine → Verifier(재분석 루프 최대 2회) → Brief → Evaluate |
-| LLM | `sentinel/agents/llm.py` | 사건 분류(Claude Haiku 5.5, 구조화 출력), 브리프(Claude Sonnet 5.5). 숫자는 placeholder로만 쓰게 하고 감사 후 치환 |
+| LLM | `sentinel/agents/llm.py` | 사건 분류(구조화 출력)와 브리프 작성만 담당. Gemini(현재 기본) 또는 Claude 선택. 숫자는 placeholder로만 쓰게 하고 감사 후 치환 |
 | Replay / 백테스트 | `sentinel/backtest.py` | 사건별 Leave-one-out, 사건 직전 데이터만 사용 |
 | UI | `app/streamlit_app.py` | Replay, Ask, Backtest, 데이터·출처 탭 |
 
@@ -31,7 +31,7 @@ streamlit run app/streamlit_app.py        # 대시보드
 python -m pytest -q                       # 테스트 (네트워크 불필요)
 ```
 
-LLM 사용은 선택입니다. `ANTHROPIC_API_KEY`가 없으면 규칙 기반 분류와 템플릿 브리프로 동작합니다 (`.env.example` 참고).
+LLM 사용은 선택입니다. `GEMINI_API_KEY`(현재 기본) 또는 `ANTHROPIC_API_KEY`를 설정하면 사건 분류와 브리프에 LLM을 쓰고, 키가 없으면 규칙 기반 분류와 템플릿 브리프로 동작합니다 (`.env.example` 참고).
 
 ## 설계 원칙
 

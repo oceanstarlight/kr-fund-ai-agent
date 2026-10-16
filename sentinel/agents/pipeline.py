@@ -323,7 +323,7 @@ def brief_node(state: State) -> dict:
         text, engine = template_brief(facts, state), "template"
         why = "LLM 미사용" if problems == ["llm unavailable"] else f"LLM 결과 감사 실패 → 템플릿 대체 ({'; '.join(problems)})"
     else:
-        engine, why = "llm", "LLM 작성, 수치 감사 통과"
+        engine, why = "llm", f"LLM({llm.provider()}) 작성, 수치 감사 통과"
     return {"facts": facts, "brief": text, "brief_engine": engine, **_step("brief", why)}
 
 

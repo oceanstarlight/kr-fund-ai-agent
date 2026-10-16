@@ -11,9 +11,14 @@ CACHE_DIR = Path(os.environ.get("SENTINEL_CACHE_DIR", DATA_DIR / "cache"))
 REPORT_DIR = ROOT / "reports"
 MANIFEST_PATH = CACHE_DIR / "manifest.json"
 
-# LLM routing: lightweight model for classification, stronger model for the brief.
-MODEL_FAST = os.environ.get("SENTINEL_MODEL_FAST", "claude-haiku-5-5")
-MODEL_SMART = os.environ.get("SENTINEL_MODEL_SMART", "claude-sonnet-5-5")
+# LLM routing. Provider "auto" picks Gemini when a Google key is set, then Anthropic, else none.
+# LLMs only classify free-text events and write the brief; they are called only after the
+# deterministic sentinel triggers (or a user asks), so per-event cost stays near zero.
+LLM_PROVIDER = os.environ.get("SENTINEL_LLM_PROVIDER", "auto")  # auto | gemini | anthropic | none
+GEMINI_MODEL_FAST = os.environ.get("SENTINEL_GEMINI_MODEL_FAST", "gemini-flash-lite-latest")
+GEMINI_MODEL_SMART = os.environ.get("SENTINEL_GEMINI_MODEL_SMART", "gemini-flash-latest")
+ANTHROPIC_MODEL_FAST = os.environ.get("SENTINEL_MODEL_FAST", "claude-haiku-5-5")
+ANTHROPIC_MODEL_SMART = os.environ.get("SENTINEL_MODEL_SMART", "claude-sonnet-5-5")
 
 # Forecast horizons in trading days (D+1 = event day close vs. prior close).
 HORIZONS = (1, 5, 20)
