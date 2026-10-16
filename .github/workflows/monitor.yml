@@ -1,0 +1,67 @@
+name: monitor
+
+# Every 30 minutes. Each run processes every GDELT 15-minute file published since the
+# previous run, so no file is skipped; only alert latency depends on the interval.
+# Private repositories get a limited number of free Actions minutes per month; a 15-minute
+# schedule (about 2,900 runs/month) can exceed it, so 30 minutes is the default.
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-monitor.txt
+
+      - run: pip install -r requirements-monitor.txt
+
+      - name: Restore monitor state and data cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            monitor_state
+            data/cache
+          key: monitor-state-${{ github.run_id }}
+          restore-keys: monitor-state-
+
+      - name: Run monitor
+        id: run
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SENTINEL_MONITOR_PRESET: sovereign
+        run: python scripts/monitor.py --state-dir monitor_state
+
+      - name: Save monitor state and data cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            monitor_state
+            data/cache
+          key: monitor-state-${{ github.run_id }}
+
+      - name: Open an issue for new alerts
+        if: steps.run.outputs.alerts != '' && steps.run.outputs.alerts != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --title "MACRO SENTINEL alert $(date -u +'%Y-%m-%d %H:%M UTC')" \
+            --body-file monitor_state/new_alerts.md

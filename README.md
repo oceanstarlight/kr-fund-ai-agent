@@ -14,6 +14,8 @@
 | 사건 라이브러리 | `sentinel/events/events.json` | 2008~2025년 22개 사건 (유형, 지역, 전이 경로, 시장 반응 첫 거래일 t0) |
 | 정량 엔진 | `sentinel/quant/` | 엔진 A 팩터모델(주간 Ridge 회귀), 엔진 B 과거사건 재현, 변동성 국면 보정, VaR/CVaR, 자산별 기여도 |
 | Sentinel | `sentinel/monitor.py` | 시장 변수 일간 z-score, GPR 지수 z-score 이상 감지 |
+| GDELT 감시 | `sentinel/gdelt_monitor.py`, `scripts/monitor.py` | GDELT 15분 원본 파일로 국가별 분쟁 보도 비중의 급증 감지(2구간 연속, robust z ≥ 4). 신호가 뜰 때만 에이전트 실행 |
+| 상시 구동 | `.github/workflows/monitor.yml` | GitHub Actions 예약 실행, 상태는 Actions 캐시에 저장, 경보는 GitHub Issue로 알림 |
 | 도구 레이어 | `sentinel/tools.py` | 모든 도구가 값 + 근거(evidence) + 알려진 한계(unknowns)를 함께 반환 |
 | Agent 파이프라인 | `sentinel/agents/pipeline.py` | LangGraph: Orchestrator → Sentinel(코드) → Planner(LLM) → Executor(도구) → Verifier(코드, 실패 시 사유를 붙여 재계획, 최대 2회) → Reviewer(LLM) → Brief(코드) → Evaluate |
 | LLM | `sentinel/agents/llm.py` | Planner: 사건 분류 + 유사 사건 검색 조건 결정. Reviewer: 근거·한계를 보고 확인/주의 판정(주의면 등급 하향) + 해석 작성. 사건당 2회 호출(재계획 시 +1). 숫자는 자리표시자로만 쓰고 감사 후 치환. Gemini(현재 기본) 또는 Claude |
@@ -31,6 +33,7 @@ python scripts/build_snapshot.py          # 데이터 수집 → data/cache (약
 python scripts/run_backtest.py --offline  # 백테스트 → reports/
 streamlit run app/streamlit_app.py        # 대시보드
 python -m pytest -q                       # 테스트 (네트워크 불필요)
+python scripts/monitor.py                 # 감시 1회 실행 (GitHub Actions가 주기적으로 실행)
 ```
 
 LLM 사용은 선택입니다. `GEMINI_API_KEY`(현재 기본) 또는 `ANTHROPIC_API_KEY`를 설정하면 Planner·Reviewer에 LLM을 쓰고, 키가 없으면 규칙 기반 계획과 템플릿 브리프로 동작합니다. 키는 git에 올리지 않는 `.env`에 둡니다 (`.env.example` 참고).

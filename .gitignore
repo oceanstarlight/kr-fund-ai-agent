@@ -6,3 +6,4 @@ __pycache__/
 # Raw market data is fetched locally (python scripts/build_snapshot.py) and not redistributed.
 data/cache/
 .streamlit/secrets.toml
+monitor_state/

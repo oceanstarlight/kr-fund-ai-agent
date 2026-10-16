@@ -1,0 +1,9 @@
+# Minimal set for the scheduled monitor (no UI, no MCP, no tests).
+anthropic>=1.15
+google-genai>=2.0
+langgraph>=1.2
+pandas>=2.2
+numpy>=2.0
+requests>=2.32
+pydantic>=2.10
+xlrd>=2.0
