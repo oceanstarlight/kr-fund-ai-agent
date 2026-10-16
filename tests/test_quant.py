@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 
+from sentinel import config
 from sentinel.data.store import MarketData
 from sentinel.data.universe import PRESETS, normalize
 from sentinel.events.library import Event, find_analogs, load_events
@@ -97,3 +98,26 @@ def test_event_library_is_consistent():
         assert e.t0 >= e.date - pd.Timedelta(days=1), e.id
         assert (e.t0 - e.date).days <= 3, e.id
         assert e.t0.dayofweek < 5, e.id
+
+
+def test_ridge_cv_matches_brute_force_loo(monkeypatch):
+    rng = np.random.default_rng(1)
+    X = rng.normal(size=(120, 4))
+    y = X @ np.array([0.5, 0.0, 0.2, 0.0]) + rng.normal(size=120)
+    grid = (0.001, 0.01, 0.1, 1.0, 10.0)
+
+    def loo(a):
+        err = []
+        for i in range(len(y)):
+            m = np.arange(len(y)) != i
+            c, _ = betas_mod._ridge(X[m], y[m], a)
+            err.append((y[i] - y[m].mean() - (X[i] - X[m].mean(0)) @ c) ** 2)
+        return np.mean(err)
+
+    assert betas_mod.select_alpha(X, y, grid) == min(grid, key=loo)
+
+
+def test_ridge_cv_mode_records_alpha(synthetic_md, monkeypatch):
+    monkeypatch.setattr("sentinel.config.RIDGE_ALPHA", "cv")
+    b = betas_mod.estimate_betas(synthetic_md, pd.Timestamp("2015-01-01"), ["SPY", "EFA"])
+    assert b.alpha.isin(config.RIDGE_ALPHAS).all()
