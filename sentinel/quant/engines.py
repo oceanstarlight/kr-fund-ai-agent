@@ -11,6 +11,9 @@ from sentinel.data.store import MarketData
 from sentinel.quant.betas import BetaResult
 from sentinel.quant.scenario import AnalogWindow
 from sentinel.quant.stats import quantiles, weighted_quantile
+from sentinel.quant.vol import garch_sigma
+
+Z_QUARTILE = 0.6745  # standard normal 75th percentile
 
 
 @dataclass
@@ -25,6 +28,8 @@ class HorizonImpact:
     contribution: pd.Series  # weight * asset_blend_median
     backfilled_weight: float  # portfolio weight whose analog-window data came from proxies
     notes: list[str] = field(default_factory=list)
+    interval_method: str = "analog"
+    interval_sigma: float = float("nan")  # forecast std of the h-day portfolio return (garch)
 
     @property
     def engine_gap(self) -> float:
@@ -43,9 +48,20 @@ def portfolio_vol(md: MarketData, weights: dict[str, float], asof: pd.Timestamp,
     return float(port.std()) if len(port) > 10 else float("nan")
 
 
-def vol_scale(md: MarketData, weights: dict[str, float], analog_base: pd.Timestamp, target_base: pd.Timestamp) -> float:
-    """Rescale an analog's moves to today's volatility regime, clipped to [0.5, 2]."""
-    va, vt = portfolio_vol(md, weights, analog_base), portfolio_vol(md, weights, target_base)
+def vol_scale(
+    md: MarketData, weights: dict[str, float], analog_base: pd.Timestamp, target_base: pd.Timestamp,
+    method: str = "garch", horizon: int = 1,
+) -> float:
+    """Rescale an analog's moves to today's volatility regime, clipped to [0.5, 2].
+
+    "garch": ratio of GARCH(1,1) volatility forecasts over the same horizon at the two base
+    dates (GARCH mean-reverts, so a one-day ratio would overstate long-horizon scaling).
+    "realized": ratio of trailing 60-day realized volatilities.
+    """
+    if method == "garch":
+        va, vt = garch_sigma(md, weights, analog_base, horizon), garch_sigma(md, weights, target_base, horizon)
+    else:
+        va, vt = portfolio_vol(md, weights, analog_base), portfolio_vol(md, weights, target_base)
     if not va or np.isnan(va) or np.isnan(vt):
         return 1.0
     return float(np.clip(vt / va, 0.5, 2.0))
@@ -58,13 +74,15 @@ def portfolio_impact(
     betas: BetaResult,
     horizon: int,
     use_vol_scale: bool = True,
+    vol_method: str = "garch",
+    interval_method: str = "garch",
 ) -> HorizonImpact:
     tickers = list(weights)
     w = pd.Series(weights)
     rows, asset_blend, notes = [], [], []
     backfilled = 0.0
     for x in windows:
-        sc = vol_scale(md, weights, x.base, betas.asof) if use_vol_scale else 1.0
+        sc = vol_scale(md, weights, x.base, betas.asof, vol_method, horizon) if use_vol_scale else 1.0
         ra = engine_a_asset(betas, x.factor_change * sc).reindex(tickers)
         rb = x.asset_return.reindex(tickers) * sc
         missing_b = rb.isna()
@@ -95,17 +113,30 @@ def portfolio_impact(
     wts = per["weight"].to_numpy()
     ab = pd.DataFrame(asset_blend)
     med = pd.Series({t: weighted_quantile(ab[t].to_numpy(), wts, 0.5) for t in tickers})
+    blend = quantiles(per["blend"].to_numpy(), wts)
+    sigma = float("nan")
+    if interval_method == "garch":
+        # Prediction interval = analog spread plus the market noise expected over the horizon.
+        # A few analogs alone understate uncertainty (backtest coverage was well below 50%).
+        mu = float(np.average(per["blend"], weights=wts)) if wts.sum() > 0 else float(per["blend"].mean())
+        sd_analog = float(np.sqrt(np.average((per["blend"] - mu) ** 2, weights=wts))) if len(per) > 1 else 0.0
+        sigma = garch_sigma(md, weights, betas.asof, horizon)
+        if np.isfinite(sigma):
+            half = Z_QUARTILE * float(np.sqrt(sd_analog**2 + sigma**2))
+            blend["q25"], blend["q75"] = blend["q50"] - half, blend["q50"] + half
     return HorizonImpact(
         horizon=horizon,
         n_analogs=len(per),
         engine_a=quantiles(per["A"].to_numpy(), wts),
         engine_b=quantiles(per["B"].to_numpy(), wts),
-        blend=quantiles(per["blend"].to_numpy(), wts),
+        blend=blend,
         per_analog=per,
         asset_blend_median=med,
         contribution=(w * med).sort_values(),
         backfilled_weight=backfilled,
         notes=notes,
+        interval_method=interval_method if np.isfinite(sigma) or interval_method != "garch" else "analog",
+        interval_sigma=sigma,
     )
 
 

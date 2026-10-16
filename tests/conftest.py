@@ -13,6 +13,11 @@ from sentinel.data.universe import ASSETS, FACTORS
 @pytest.fixture(autouse=True)
 def _no_llm(monkeypatch):
     monkeypatch.setenv("SENTINEL_DISABLE_LLM", "1")
+    # Never read or write the real LLM response cache from tests.
+    from sentinel.agents import llm
+
+    monkeypatch.setattr("sentinel.config.LLM_CACHE", False)
+    monkeypatch.setattr(llm, "_CACHE", None)
 
 
 @pytest.fixture(scope="session")

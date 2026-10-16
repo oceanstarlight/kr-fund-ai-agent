@@ -115,7 +115,9 @@ def test_llm_planner_and_reviewer_path(synthetic_md, monkeypatch):
             return llm.Plan(
                 classification=llm.EventClassification(type="military_strike", region="middle_east",
                                                        channels=["oil", "risk_off"], headline_ko="h", rationale_ko="r"),
-                analog_k=5, min_similarity=0.3, same_type_only=False, rationale_ko="계획")
+                candidates=[llm.SearchParams(analog_k=5, min_similarity=0.3, same_type_only=False, label_ko="좁은 검색"),
+                            llm.SearchParams(analog_k=8, min_similarity=0.1, same_type_only=False, label_ko="넓은 검색")],
+                rationale_ko="계획")
         return llm.Review(verdict="caution", concerns_ko=["유사 사건 수가 적음"],
                           interpretation_md="### 해석\n- D+5 기본 시나리오는 [[port_q50_5d]] 입니다.")
 
@@ -141,3 +143,23 @@ def test_reviewer_text_with_free_numbers_is_rejected(synthetic_md, monkeypatch):
     st = run(synthetic_md, PRESETS["balanced"].weights, mode="ask", event_text="Iran strikes")
     assert st["review"] is None and st["brief_engine"] == "template"
     assert "손실은 약" not in st["brief"]
+
+
+def test_llm_responses_are_cached(monkeypatch, tmp_path):
+    monkeypatch.delenv("SENTINEL_DISABLE_LLM", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "fake")
+    monkeypatch.setattr("sentinel.config.LLM_CACHE", True)
+    monkeypatch.setattr("sentinel.config.LLM_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(llm, "_CACHE", None)
+    calls = []
+
+    def fake(schema, system, user, smart):
+        calls.append(1)
+        return llm.plan_rules("Iran strikes", 0)
+
+    monkeypatch.setattr(llm, "_structured_gemini", fake)
+    a, _ = llm.structured_call(llm.Plan, "sys", "same prompt")
+    b, _ = llm.structured_call(llm.Plan, "sys", "same prompt")
+    c, _ = llm.structured_call(llm.Plan, "sys", "other prompt")
+    assert len(calls) == 2 and a == b and c is not None
+    monkeypatch.setattr(llm, "_CACHE", None)

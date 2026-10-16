@@ -1,12 +1,12 @@
 name: monitor
 
-# Every 30 minutes. Each run processes every GDELT 15-minute file published since the
-# previous run, so no file is skipped; only alert latency depends on the interval.
-# Private repositories get a limited number of free Actions minutes per month; a 15-minute
-# schedule (about 2,900 runs/month) can exceed it, so 30 minutes is the default.
+# Every 15 minutes, matching GDELT's update cycle. Each run also catches up on any file
+# published since the previous run, so a delayed or skipped run loses nothing.
+# Public repositories run Actions for free. For a private repository use "*/30": a 15-minute
+# schedule (about 2,900 runs/month) can exceed the free monthly minutes.
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 permissions:

@@ -7,7 +7,9 @@ realized portfolio return. LLMs are not used, so results are deterministic.
 
 from __future__ import annotations
 
+import multiprocessing as mp
 import os
+from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import pandas as pd
@@ -19,45 +21,61 @@ from sentinel.data.store import MarketData
 from sentinel.events.library import load_events
 
 
+_SHARED: dict = {}  # market data handed to forked workers without pickling it per job
+
+
+def _replay_one(args) -> list[dict]:
+    weights, ev_id, horizons, opts = args
+    st = run(_SHARED["md"], weights, mode="replay", event_id=ev_id, horizons=tuple(horizons), **opts)
+    ev = st["event"]
+    rows = []
+    for h in horizons:
+        p = st["impacts"][h]
+        r = st["realized"].get(h)
+        if r is None or p.n_analogs == 0:
+            continue
+        rows.append(
+            {
+                "event": ev.id, "name": ev.name, "t0": ev.t0.date(), "horizon": h,
+                "n_analogs": p.n_analogs, "grade": st["verification"]["grade"],
+                "detected": st["detection"]["triggered"],
+                "pred_a": p.engine_a["q50"], "pred_b": p.engine_b["q50"], "pred": p.blend["q50"],
+                "q25": p.blend["q25"], "q75": p.blend["q75"], "realized": r["realized"],
+            }
+        )
+    return rows
+
+
 def run_backtest(
-    md: MarketData, weights: dict[str, float], horizons=config.HORIZONS, vol_scale: bool = True
+    md: MarketData, weights: dict[str, float], horizons=config.HORIZONS, vol_scale: bool = True,
+    vol_method: str = config.VOL_METHOD, interval_method: str = config.INTERVAL_METHOD, workers: int | None = None,
 ) -> pd.DataFrame:
+    """Events are independent, so they run in parallel processes (LLM disabled, deterministic)."""
     prev = os.environ.get("SENTINEL_DISABLE_LLM")
     os.environ["SENTINEL_DISABLE_LLM"] = "1"
-    rows = []
+    opts = {"vol_scale": vol_scale, "vol_method": vol_method, "interval_method": interval_method}
+    _SHARED["md"] = md
+    jobs = [
+        (weights, ev.id, tuple(horizons), opts)
+        for ev in load_events()
+        if md.trading_day_before(ev.t0) is not None and md.window(ev.t0, max(horizons)) is not None
+    ]
+    workers = workers if workers is not None else min(len(jobs), os.cpu_count() or 1)
     try:
-        for ev in load_events():
-            if md.trading_day_before(ev.t0) is None or md.window(ev.t0, max(horizons)) is None:
-                continue
-            st = run(md, weights, mode="replay", event_id=ev.id, horizons=tuple(horizons), vol_scale=vol_scale)
-            for h in horizons:
-                p = st["impacts"][h]
-                r = st["realized"].get(h)
-                if r is None or p.n_analogs == 0:
-                    continue
-                rows.append(
-                    {
-                        "event": ev.id,
-                        "name": ev.name,
-                        "t0": ev.t0.date(),
-                        "horizon": h,
-                        "n_analogs": p.n_analogs,
-                        "grade": st["verification"]["grade"],
-                        "detected": st["detection"]["triggered"],
-                        "pred_a": p.engine_a["q50"],
-                        "pred_b": p.engine_b["q50"],
-                        "pred": p.blend["q50"],
-                        "q25": p.blend["q25"],
-                        "q75": p.blend["q75"],
-                        "realized": r["realized"],
-                    }
-                )
+        if workers > 1:
+            if "fork" in mp.get_all_start_methods():
+                with ProcessPoolExecutor(max_workers=workers, mp_context=mp.get_context("fork")) as ex:
+                    parts = list(ex.map(_replay_one, jobs))
+            else:  # no fork (e.g. Windows): run sequentially rather than pickling data per job
+                parts = [_replay_one(j) for j in jobs]
+        else:
+            parts = [_replay_one(j) for j in jobs]
     finally:
         if prev is None:
             os.environ.pop("SENTINEL_DISABLE_LLM", None)
         else:
             os.environ["SENTINEL_DISABLE_LLM"] = prev
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame([row for part in parts for row in part])
     if not df.empty:
         df["shock_baseline"] = _shock_baseline(md, weights, df)
     return df
@@ -145,8 +163,8 @@ def to_markdown(
     if ablation is not None:
         lines += [
             "",
-            "## 비교 실험: 변동성 국면 보정 미적용",
-            "유사 사건의 변동을 현재 변동성 국면에 맞춰 조정하지 않았을 때의 결과(본 결과와 비교용).",
+            "## 비교 실험: 이전 예측 구간 방식 (유사 사건 분위수만 사용)",
+            "본 결과는 유사 사건 분산에 GARCH 변동성 예측을 더해 구간을 만듦. 아래는 이전 방식(비교용). 점 예측은 동일.",
             "",
             "| 기간 | 방향 적중 | MAE(통합) | MAE(0% 기준선) | 기준선 대비 개선 | 구간 포함률 | 순위상관 |",
             "|---|---|---|---|---|---|---|",

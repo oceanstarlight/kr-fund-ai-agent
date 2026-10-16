@@ -143,12 +143,15 @@ def estimate_sensitivities(ctx: ToolContext) -> ToolResult:
     return ToolResult("estimate_sensitivities", b, ev, unk)
 
 
-def compute_impact(ctx: ToolContext, scenario: dict, betas, use_vol_scale: bool = True) -> ToolResult:
+def compute_impact(
+    ctx: ToolContext, scenario: dict, betas, use_vol_scale: bool = True,
+    vol_method: str = config.VOL_METHOD, interval_method: str = config.INTERVAL_METHOD,
+) -> ToolResult:
     md = ctx.visible
     impacts: dict[int, HorizonImpact] = {}
     unk = []
     for h, sc in scenario.items():
-        impacts[h] = portfolio_impact(md, ctx.weights, sc["windows"], betas, h, use_vol_scale)
+        impacts[h] = portfolio_impact(md, ctx.weights, sc["windows"], betas, h, use_vol_scale, vol_method, interval_method)
     p = impacts.get(config.PRIMARY_HORIZON) or next(iter(impacts.values()))
     if p.notes:
         unk.append(Unknown("engine_b_fallback", "일부 자산은 과거 사건 당시 데이터가 없어 엔진A 값으로 대체", "; ".join(p.notes)[:200]))
@@ -161,7 +164,8 @@ def compute_impact(ctx: ToolContext, scenario: dict, betas, use_vol_scale: bool 
     if not p.per_analog.empty and (p.per_analog["vol_scale"] >= 1.99).all():
         unk.append(Unknown("vol_regime", "현재 변동성이 과거 유사 사건 당시보다 높아 보정 배수가 상한에 걸림"))
     ev = ["엔진A: 민감도 × 유사 사건 팩터 변화", "엔진B: 유사 사건 당시 자산 실측 수익률",
-          "변동성 국면 보정 " + ("적용" if use_vol_scale else "미적용")]
+          "변동성 국면 보정 " + (f"적용({vol_method})" if use_vol_scale else "미적용"),
+          f"예측 구간: {'유사 사건 분산 + GARCH 변동성 예측' if p.interval_method == 'garch' else '유사 사건 분위수'}"]
     return ToolResult("compute_impact", impacts, ev, unk)
 
 

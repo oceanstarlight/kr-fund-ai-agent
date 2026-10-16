@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import operator
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated, Any, TypedDict
 
 import pandas as pd
@@ -39,6 +40,8 @@ class State(TypedDict, total=False):
     aum: float
     currency: str
     vol_scale: bool
+    vol_method: str
+    interval_method: str
     event_id: str
     event_text: str
     horizons: tuple[int, ...]
@@ -57,6 +60,7 @@ class State(TypedDict, total=False):
     betas: Any
     risk: dict
     tool_results: dict[str, tools.ToolResult]
+    candidates: list[dict]
     verification: dict
     review: dict | None
     facts: dict
@@ -123,65 +127,94 @@ def planner_node(state: State) -> dict:
     feedback = (state.get("verification") or {}).get("feedback") if attempt else None
     plan, engine = llm.plan_event(text, attempt, tags, feedback)
     cls = plan.classification.model_dump()
+    cands = "; ".join(
+        f"{c.label_ko}(최대 {c.analog_k}건, 유사도 {c.min_similarity:.2f}{', 동일 유형' if c.same_type_only else ''})"
+        for c in plan.candidates
+    )
     summary = (
         f"[계획 {attempt + 1}] 분류 {cls['type']}/{cls['region']}/{','.join(cls['channels'])} ({engine}); "
-        f"유사 사건 최대 {plan.analog_k}건, 최소 유사도 {plan.min_similarity:.2f}"
-        f"{', 동일 유형만' if plan.same_type_only else ''} - {plan.rationale_ko}"
+        f"검색 후보 {len(plan.candidates)}개: {cands} - {plan.rationale_ko}"
     )
     return {"plan": plan.model_dump(), "classification": cls, "classifier": engine, **_step("planner", summary)}
 
 
-def executor_node(state: State) -> dict:
-    plan = state["plan"]
-    ev = state.get("event")
-    ctx = tools.ToolContext(state["md"], state["weights"], state["base"], ev.id if ev else None)
-    results = dict(state["tool_results"])
-    r_an = tools.search_analogs(ctx, state["classification"], plan["analog_k"], plan["min_similarity"], plan["same_type_only"])
-    r_sc = tools.build_scenario(ctx, r_an.value, state["horizons"])
-    r_be = tools.estimate_sensitivities(ctx)
-    r_im = tools.compute_impact(ctx, r_sc.value, r_be.value, state.get("vol_scale", True))
-    r_rk = tools.historical_risk(ctx, state["horizons"])
-    for r in (r_an, r_sc, r_be, r_im, r_rk):
-        results[r.tool] = r
-    p = r_im.value.get(config.PRIMARY_HORIZON) or next(iter(r_im.value.values()))
-    names = ", ".join(f"{a.event.name}({a.similarity:.2f})" for a in r_an.value)
-    summary = (
-        f"도구 5종 실행: 유사 사건 {len(r_an.value)}건 [{names}] → D+{p.horizon} 엔진A {p.engine_a['q50']:+.2%}, "
-        f"엔진B {p.engine_b['q50']:+.2%}, 통합 {p.blend['q50']:+.2%} (불리 {p.blend['q25']:+.2%}); "
-        f"보고된 한계 {len(tools.unknowns_of(list(results.values())))}건"
-    )
-    return {
-        "analogs": r_an.value, "scenario": r_sc.value, "betas": r_be.value, "impacts": r_im.value,
-        "risk": r_rk.value, "tool_results": results, **_step("executor", summary),
-    }
-
-
-def verifier_node(state: State) -> dict:
-    p = state["impacts"].get(config.PRIMARY_HORIZON) or next(iter(state["impacts"].values()))
-    b = state["betas"]
-    w = pd.Series(state["weights"])
+def rule_checks(impacts: dict, analogs: list, betas, weights: dict[str, float]) -> dict:
+    """Deterministic checks shared by candidate selection and the verifier."""
+    p = impacts.get(config.PRIMARY_HORIZON) or next(iter(impacts.values()))
+    w = pd.Series(weights)
     checks = []
     n_ok = p.n_analogs >= config.ANALOG_MIN
     checks.append({"check": "유사 사건 수", "ok": n_ok, "detail": f"{p.n_analogs}건 (최소 {config.ANALOG_MIN})"})
     tol = max(config.ENGINE_GAP_ABS, config.ENGINE_GAP_REL * abs(0.5 * (p.engine_a["q50"] + p.engine_b["q50"])))
     gap_ok = bool(p.n_analogs) and p.engine_gap <= tol
     checks.append({"check": "엔진 A/B 교차검증", "ok": gap_ok, "detail": f"차이 {p.engine_gap:.2%}p (허용 {tol:.2%}p)"})
-    beta_cov = float(w[b.beta.dropna(how='all').index.intersection(w.index)].sum())
+    beta_cov = float(w[betas.beta.dropna(how='all').index.intersection(w.index)].sum())
     checks.append({"check": "민감도 추정 커버리지", "ok": beta_cov >= 0.95, "detail": f"비중 {beta_cov:.0%}"})
     proxy_ok = p.backfilled_weight <= 0.2
     checks.append({"check": "프록시 데이터 비중", "ok": proxy_ok, "detail": f"최대 {p.backfilled_weight:.0%}"})
-    sims = [a.similarity for a in state["analogs"]]
+    sims = [a.similarity for a in analogs]
     mean_sim = sum(sims) / len(sims) if sims else 0.0
     checks.append({"check": "유사도 평균", "ok": mean_sim >= 0.35, "detail": f"{mean_sim:.2f} (기준 0.35)"})
-
-    attempt = state.get("attempt", 0)
-    retry = (not n_ok or not gap_ok) and attempt < config.MAX_VERIFY_RETRIES
     if n_ok and gap_ok and beta_cov >= 0.95 and proxy_ok and mean_sim >= 0.35 and p.n_analogs >= config.ANALOG_K:
         grade = "A"
     elif n_ok and gap_ok:
         grade = "B"
     else:
         grade = "C"
+    return {"checks": checks, "passed": n_ok and gap_ok, "grade": grade, "mean_sim": mean_sim, "n": p.n_analogs}
+
+
+def executor_node(state: State) -> dict:
+    """Run the tools. Search candidates from the plan are executed in parallel and the first
+    one that passes the rule checks is kept (no extra LLM call for a fallback search)."""
+    plan = state["plan"]
+    ev = state.get("event")
+    ctx = tools.ToolContext(state["md"], state["weights"], state["base"], ev.id if ev else None)
+    results = dict(state["tool_results"])
+    r_be = tools.estimate_sensitivities(ctx)
+    r_rk = tools.historical_risk(ctx, state["horizons"])
+
+    def run_candidate(c: dict):
+        r_an = tools.search_analogs(ctx, state["classification"], c["analog_k"], c["min_similarity"], c["same_type_only"])
+        r_sc = tools.build_scenario(ctx, r_an.value, state["horizons"])
+        r_im = tools.compute_impact(ctx, r_sc.value, r_be.value, state.get("vol_scale", True),
+                                    state.get("vol_method", config.VOL_METHOD),
+                                    state.get("interval_method", config.INTERVAL_METHOD))
+        return c, r_an, r_sc, r_im, rule_checks(r_im.value, r_an.value, r_be.value, state["weights"])
+
+    cands = plan["candidates"]
+    if len(cands) > 1:
+        with ThreadPoolExecutor(max_workers=len(cands)) as ex:
+            outs = list(ex.map(run_candidate, cands))
+    else:
+        outs = [run_candidate(cands[0])]
+    passing = [o for o in outs if o[4]["passed"]]
+    # Keep the preferred passing candidate; if none pass, the one closest to passing.
+    chosen = passing[0] if passing else max(outs, key=lambda o: (o[4]["n"] >= config.ANALOG_MIN, o[4]["mean_sim"]))
+    c, r_an, r_sc, r_im, chk = chosen
+    for r in (r_an, r_sc, r_be, r_im, r_rk):
+        results[r.tool] = r
+    p = r_im.value.get(config.PRIMARY_HORIZON) or next(iter(r_im.value.values()))
+    cand_txt = ", ".join(f"{o[0]['label_ko']} {'통과' if o[4]['passed'] else '미통과'}({o[4]['n']}건)" for o in outs)
+    names = ", ".join(f"{a.event.name}({a.similarity:.2f})" for a in r_an.value)
+    summary = (
+        f"후보 {len(outs)}개 병렬 실행 [{cand_txt}] → '{c['label_ko']}' 채택: 유사 사건 [{names}] → "
+        f"D+{p.horizon} 엔진A {p.engine_a['q50']:+.2%}, 엔진B {p.engine_b['q50']:+.2%}, 통합 {p.blend['q50']:+.2%} "
+        f"(불리 {p.blend['q25']:+.2%}); 보고된 한계 {len(tools.unknowns_of(list(results.values())))}건"
+    )
+    cand_log = [{"label": o[0]["label_ko"], "params": o[0], "passed": o[4]["passed"], "n_analogs": o[4]["n"],
+                 "mean_similarity": o[4]["mean_sim"]} for o in outs]
+    return {
+        "analogs": r_an.value, "scenario": r_sc.value, "betas": r_be.value, "impacts": r_im.value,
+        "risk": r_rk.value, "tool_results": results, "candidates": cand_log, **_step("executor", summary),
+    }
+
+
+def verifier_node(state: State) -> dict:
+    chk = rule_checks(state["impacts"], state["analogs"], state["betas"], state["weights"])
+    checks, grade = chk["checks"], chk["grade"]
+    attempt = state.get("attempt", 0)
+    retry = not chk["passed"] and attempt < config.MAX_VERIFY_RETRIES
     feedback = [f"{c['check']} 실패: {c['detail']}" for c in checks if not c["ok"]]
     verdict = "재계획 요청" if retry else f"통과 (규칙 등급 {grade})"
     summary = f"{verdict}: " + "; ".join(f"{c['check']} {'OK' if c['ok'] else 'NG'}({c['detail']})" for c in checks)

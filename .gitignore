@@ -7,3 +7,4 @@ __pycache__/
 data/cache/
 .streamlit/secrets.toml
 monitor_state/
+data/llm_cache/

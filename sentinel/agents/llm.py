@@ -106,11 +106,19 @@ def _gemini():
 
 
 # --------------------------------------------------------------------- classification
-class Plan(BaseModel):
-    classification: EventClassification
+class SearchParams(BaseModel):
     analog_k: int = Field(description="How many historical analogs to use, 3-10")
     min_similarity: float = Field(description="Minimum tag similarity for an analog, 0.05-0.6")
     same_type_only: bool = Field(description="Restrict analogs to the same event type")
+    label_ko: str = Field(description="Short Korean label, e.g. '좁은 검색' or '넓은 검색'")
+
+
+class Plan(BaseModel):
+    classification: EventClassification
+    candidates: list[SearchParams] = Field(
+        description="One or two analog-search settings in order of preference (narrow first). "
+        "Both are executed in parallel and the verifier keeps the first that passes."
+    )
     rationale_ko: str = Field(description="1-2 Korean sentences on why this plan")
 
 
@@ -123,10 +131,11 @@ class Review(BaseModel):
 PLANNER_SYSTEM = (
     "You are the planner of a geopolitical/macro risk agent for institutional investors. "
     "Given an event report (and, when present, curated tags or verifier feedback), output a "
-    "plan: classify the event with the allowed labels, and choose analog-search parameters "
-    "for the deterministic tools. Prefer fewer but closer analogs when the event type is "
-    "common; widen the search (more analogs, lower similarity, not same-type) when feedback "
-    "says analogs are too few or the two engines disagree. Write Korean text fields in Korean."
+    "plan: classify the event with the allowed labels, and give one or two analog-search "
+    "settings for the deterministic tools, preferred one first. A good default is a narrow "
+    "setting (fewer, closer analogs) followed by a wider fallback; both run in parallel, so a "
+    "second candidate avoids a costly re-plan. When verifier feedback says analogs are too few "
+    "or the two engines disagree, widen both candidates. Write Korean text fields in Korean."
 )
 
 REVIEWER_SYSTEM = (
@@ -241,31 +250,68 @@ def _structured_gemini(schema, system: str, user: str, smart: bool):
     return schema.model_validate_json(resp.text) if resp.text else None
 
 
+_CACHE = None
+
+
+def _cache():
+    global _CACHE
+    if _CACHE is None and config.LLM_CACHE:
+        try:
+            import diskcache
+
+            _CACHE = diskcache.Cache(str(config.LLM_CACHE_DIR), size_limit=200 * 2**20)
+        except Exception:  # noqa: BLE001 - caching is an optimization only
+            _CACHE = False
+    # An empty diskcache.Cache is falsy (it defines __len__), so test identity, not truthiness.
+    return None if _CACHE is None or _CACHE is False else _CACHE
+
+
+def _cache_key(p: str, schema, system: str, user: str, smart: bool) -> str:
+    import hashlib
+
+    raw = json.dumps([p, models()[1 if smart else 0], schema.__name__,
+                      json.dumps(schema.model_json_schema(), sort_keys=True), system, user], ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def structured_call(schema, system: str, user: str, smart: bool = False):
-    """Returns (parsed object or None, error string or None)."""
+    """Returns (parsed object or None, error string or None). Successful results are cached."""
     p = provider()
     if p == "none":
         return None, "llm unavailable"
+    cache = _cache()
+    key = _cache_key(p, schema, system, user, smart) if cache is not None else None
+    if cache is not None and key in cache:
+        try:
+            return schema.model_validate_json(cache[key]), None
+        except Exception:  # noqa: BLE001 - stale entry from an older schema
+            del cache[key]
     fn = _structured_gemini if p == "gemini" else _structured_anthropic
     try:
         out = _with_retry(fn, schema, system, user, smart)
     except Exception as exc:  # network/API failure must not break the pipeline
         return None, f"{p} error: {type(exc).__name__}"
-    return (out, None) if out is not None else (None, f"{p} returned no result")
+    if out is None:
+        return None, f"{p} returned no result"
+    if cache is not None:
+        cache[key] = out.model_dump_json()
+    return out, None
 
 
 # ----------------------------------------------------------------------------- planner
 def plan_rules(text: str, attempt: int, tags: dict | None = None) -> Plan:
-    """Deterministic planner: curated tags or keyword rules, widening the search on retries."""
+    """Deterministic planner: curated tags or keyword rules, a narrow and a wide candidate."""
     cls = EventClassification(**{**tags, "headline_ko": tags.get("headline_ko", text[:80]),
                                  "rationale_ko": tags.get("rationale_ko", "")}) if tags else classify_rules(text)
-    k, min_sim, same = config.ANALOG_K, config.ANALOG_MIN_SIMILARITY, False
-    if attempt == 1:
-        k, min_sim, same = config.ANALOG_K + 2, 0.15, True
-    elif attempt >= 2:
-        k, min_sim, same = config.ANALOG_K + 5, 0.05, False
-    return Plan(classification=cls, analog_k=k, min_similarity=min_sim, same_type_only=same,
-                rationale_ko=f"규칙 기반 계획 (시도 {attempt + 1})")
+    if attempt == 0:
+        cands = [
+            SearchParams(analog_k=config.ANALOG_K, min_similarity=config.ANALOG_MIN_SIMILARITY,
+                         same_type_only=False, label_ko="기본 검색"),
+            SearchParams(analog_k=config.ANALOG_K + 2, min_similarity=0.15, same_type_only=True, label_ko="동일 유형 확장"),
+        ]
+    else:
+        cands = [SearchParams(analog_k=config.ANALOG_K + 5, min_similarity=0.05, same_type_only=False, label_ko="최대 확장")]
+    return Plan(classification=cls, candidates=cands, rationale_ko=f"규칙 기반 계획 (시도 {attempt + 1})")
 
 
 def plan_event(text: str, attempt: int = 0, tags: dict | None = None, feedback: list[str] | None = None) -> tuple[Plan, str]:
@@ -278,8 +324,9 @@ def plan_event(text: str, attempt: int = 0, tags: dict | None = None, feedback: 
         ensure_ascii=False,
     )
     plan, err = structured_call(Plan, PLANNER_SYSTEM, user, smart=False)
-    if plan is None:
-        return plan_rules(text, attempt, tags), f"rules ({err})"
+    if plan is None or not plan.candidates:
+        return plan_rules(text, attempt, tags), f"rules ({err or 'empty plan'})"
+    plan.candidates = plan.candidates[:2]
     if tags:  # replay: keep the curated ground-truth tags, let the LLM choose search parameters
         plan.classification = EventClassification(**{**plan.classification.model_dump(), **{
             k: tags[k] for k in ("type", "region", "channels")}})

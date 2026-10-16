@@ -26,7 +26,7 @@ def main() -> None:
     for key, preset in PRESETS.items():
         detail = run_backtest(md, preset.weights)
         summary = summarize(detail)
-        ablation = summarize(run_backtest(md, preset.weights, vol_scale=False))
+        ablation = summarize(run_backtest(md, preset.weights, interval_method="analog"))
         detail.to_csv(config.REPORT_DIR / f"backtest_{key}.csv", index=False)
         (config.REPORT_DIR / f"backtest_{key}.md").write_text(
             to_markdown(summary, detail, preset.name, ablation), encoding="utf-8"

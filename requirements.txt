@@ -1,4 +1,6 @@
 anthropic>=1.15
+arch>=7.0
+diskcache>=5.6
 google-genai>=2.0
 mcp>=2.0
 langgraph>=1.2

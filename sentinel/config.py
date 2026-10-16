@@ -35,6 +35,11 @@ GEMINI_MODEL_SMART = os.environ.get("SENTINEL_GEMINI_MODEL_SMART", "gemini-3.5-f
 ANTHROPIC_MODEL_FAST = os.environ.get("SENTINEL_MODEL_FAST", "claude-haiku-5-5")
 ANTHROPIC_MODEL_SMART = os.environ.get("SENTINEL_MODEL_SMART", "claude-sonnet-5-5")
 
+# Disk cache of LLM responses keyed by (provider, model, schema, prompt). Identical requests
+# are never paid for twice. Set SENTINEL_LLM_CACHE=0 to disable.
+LLM_CACHE = os.environ.get("SENTINEL_LLM_CACHE", "1") != "0"
+LLM_CACHE_DIR = Path(os.environ.get("SENTINEL_LLM_CACHE_DIR", DATA_DIR / "llm_cache"))
+
 # Forecast horizons in trading days (D+1 = event day close vs. prior close).
 HORIZONS = (1, 5, 20)
 PRIMARY_HORIZON = 5
@@ -43,6 +48,14 @@ PRIMARY_HORIZON = 5
 BETA_WINDOW_WEEKS = 156
 BETA_MIN_WEEKS = 52
 RIDGE_ALPHA = 0.1  # penalty on the standardized (correlation) scale
+
+# Volatility regime scaling and prediction intervals: "garch" (arch GARCH(1,1) forecast)
+# or the simple versions ("realized" 60-day vol, "analog" spread across analogs).
+# Backtest (21 events, 3 presets): GARCH intervals moved IQR coverage from 14-38% to 48-71%
+# (nominal 50%), so they are the default. GARCH vol scaling gave a negligible D+1/D+5 gain and a
+# worse D+20, so the realized-vol ratio stays the default.
+VOL_METHOD = os.environ.get("SENTINEL_VOL_METHOD", "realized")
+INTERVAL_METHOD = os.environ.get("SENTINEL_INTERVAL_METHOD", "garch")
 
 # Analog selection.
 ANALOG_K = 5
