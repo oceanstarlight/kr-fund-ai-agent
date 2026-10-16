@@ -28,7 +28,7 @@ TOOL_NAMES = TOOL_CATALOG
 
 EventType = Literal[
     "war", "military_strike", "trade", "energy_supply", "financial_stress",
-    "political", "pandemic", "disaster", "fx_shock",
+    "political", "pandemic", "disaster", "fx_shock", "terror",
 ]
 Region = Literal["middle_east", "europe", "east_asia", "korea", "north_america", "emerging", "global"]
 Channel = Literal[
@@ -169,6 +169,7 @@ REVIEWER_SYSTEM = (
 
 _RULES: list[tuple[str, dict]] = [
     (r"invasion|invade|war\b|전쟁|침공", {"type": "war", "channels": ["risk_off", "safe_haven"]}),
+    (r"terror|bombing|bomber|hijack|테러|폭탄", {"type": "terror", "channels": ["risk_off", "safe_haven"]}),
     (r"strike|missile|drone|attack|airstrike|공습|미사일|피격|사살|군사", {"type": "military_strike", "channels": ["risk_off", "safe_haven"]}),
     (r"blockade|봉쇄", {"type": "military_strike", "channels": ["risk_off", "supply_chain", "trade"]}),
     (r"tariff|trade war|관세|무역", {"type": "trade", "channels": ["trade", "risk_off", "supply_chain"]}),
@@ -195,25 +196,6 @@ _EXTRA_CHANNELS: list[tuple[str, str]] = [
     (r"ship|supply|chip|semiconductor|공급망|반도체|해운", "supply_chain"),
     (r"rate|yield|treasury|금리|국채", "rates"),
 ]
-
-
-def classify_rules(text: str) -> EventClassification:
-    t = text.lower()
-    found = {"type": "political", "channels": ["risk_off"]}
-    for pat, val in _RULES:
-        if re.search(pat, t):
-            found = val
-            break
-    region = next((r for pat, r in _REGIONS if re.search(pat, t)), "global")
-    channels = list(dict.fromkeys(found["channels"] + [c for pat, c in _EXTRA_CHANNELS if re.search(pat, t)]))
-    return EventClassification(
-        type=found["type"],
-        region=region,
-        channels=channels[:5],
-        headline_ko=text.strip().splitlines()[0][:80],
-        rationale_ko="키워드 규칙 기반 분류(LLM 미사용).",
-    )
-
 
 
 def classify_rules(text: str) -> EventClassification:

@@ -1,3 +1,4 @@
+import pytest
 import numpy as np
 import pandas as pd
 
@@ -96,8 +97,12 @@ def test_event_library_is_consistent():
     for e in events:
         assert isinstance(e, Event)
         assert e.t0 >= e.date - pd.Timedelta(days=1), e.id
-        assert (e.t0 - e.date).days <= 3, e.id
+        # Longer gaps only for documented market closures (e.g. NYSE shut after 9/11).
+        assert (e.t0 - e.date).days <= 3 or "closed" in e.note, e.id
         assert e.t0.dayofweek < 5, e.id
+        assert e.selection in ("curated", "gpr_spike", "official"), e.id
+        if e.selection == "gpr_spike":
+            assert "GPR spike" in e.note, e.id
 
 
 def test_ridge_cv_matches_brute_force_loo(monkeypatch):
@@ -121,3 +126,16 @@ def test_ridge_cv_mode_records_alpha(synthetic_md, monkeypatch):
     monkeypatch.setattr("sentinel.config.RIDGE_ALPHA", "cv")
     b = betas_mod.estimate_betas(synthetic_md, pd.Timestamp("2015-01-01"), ["SPY", "EFA"])
     assert b.alpha.isin(config.RIDGE_ALPHAS).all()
+
+
+def test_bootstrap_skill_interval():
+    from sentinel.backtest import bootstrap_skill
+
+    rng = np.random.default_rng(0)
+    base = np.abs(rng.normal(0, 0.02, 200))
+    lo, hi = bootstrap_skill(base * 0.5, base)  # model halves every error
+    assert lo == pytest.approx(0.5) and hi == pytest.approx(0.5)
+    noisy = np.abs(rng.normal(0, 0.02, 30))
+    lo, hi = bootstrap_skill(noisy, np.abs(rng.normal(0, 0.02, 30)))
+    assert lo < hi
+    assert np.isnan(bootstrap_skill(noisy[:3], noisy[:3])[0])

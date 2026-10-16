@@ -23,7 +23,7 @@ MAX_COUNTRIES = 15  # largest country P&L circles drawn; the rest stay in the ta
 
 # Event types folded into six groups, fixed categorical order.
 TYPE_GROUP = {
-    "war": "무력 충돌", "military_strike": "무력 충돌", "trade": "무역", "energy_supply": "에너지",
+    "war": "무력 충돌", "military_strike": "무력 충돌", "terror": "무력 충돌", "trade": "무역", "energy_supply": "에너지",
     "financial_stress": "금융·환율", "fx_shock": "금융·환율", "political": "정치",
     "pandemic": "재난·보건", "disaster": "재난·보건",
 }
