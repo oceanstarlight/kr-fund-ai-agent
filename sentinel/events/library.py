@@ -25,6 +25,9 @@ class Event:
     lat: float | None = None
     lon: float | None = None
     note: str = ""
+    # Why the event is in the library: "curated" (initial set), "gpr_spike" (scripts/gpr_candidates.py
+    # rule), "official" (dated official announcement in an under-represented type).
+    selection: str = "curated"
 
     def tags(self) -> dict:
         return {"type": self.type, "region": self.region, "channels": sorted(self.channels)}
@@ -57,6 +60,7 @@ def load_events() -> list[Event]:
             lat=e.get("lat"),
             lon=e.get("lon"),
             note=e.get("note", ""),
+            selection=e.get("selection", "curated"),
         )
         for e in raw
     ]

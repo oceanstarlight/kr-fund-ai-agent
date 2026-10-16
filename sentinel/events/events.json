@@ -1,7 +1,7 @@
 {
   "schema": {
     "t0": "First US trading session in which markets could react (base = prior close).",
-    "types": ["war", "military_strike", "trade", "energy_supply", "financial_stress", "political", "pandemic", "disaster", "fx_shock"],
+    "types": ["war", "military_strike", "trade", "energy_supply", "financial_stress", "political", "pandemic", "disaster", "fx_shock", "terror"],
     "regions": ["middle_east", "europe", "east_asia", "korea", "north_america", "emerging", "global"],
     "channels": ["oil", "risk_off", "safe_haven", "trade", "supply_chain", "banking", "rates", "em_fx", "krw", "china", "europe", "japan", "usd"]
   },
