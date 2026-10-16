@@ -42,6 +42,7 @@ class State(TypedDict, total=False):
     vol_scale: bool
     vol_method: str
     interval_method: str
+    use_curated_tags: bool  # replay: False lets the planner classify the event text itself
     event_id: str
     event_text: str
     horizons: tuple[int, ...]
@@ -126,7 +127,8 @@ def _signals_text(det: dict) -> str:
 def planner_node(state: State) -> dict:
     attempt = state.get("attempt", 0)
     ev: Event | None = state.get("event")
-    tags = {**ev.tags(), "headline_ko": ev.name, "rationale_ko": ev.note or ev.description} if ev else None
+    use_tags = ev is not None and state.get("use_curated_tags", True)
+    tags = {**ev.tags(), "headline_ko": ev.name, "rationale_ko": ev.note or ev.description} if use_tags else None
     text = state.get("event_text") or _signals_text(state.get("detection", {}))
     feedback = (state.get("verification") or {}).get("feedback") if attempt else None
     plan, engine = llm.plan_event(text, attempt, tags, feedback)
