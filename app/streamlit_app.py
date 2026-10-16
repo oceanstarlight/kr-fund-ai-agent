@@ -100,8 +100,8 @@ st.sidebar.markdown(
 
 # ------------------------------------------------------------------------ views
 def render_trace(state: dict) -> None:
-    icons = {"orchestrator": "0", "sentinel": "1", "analyst": "2", "scenario_builder": "3",
-             "quant_engine": "4", "verifier": "6", "brief": "7", "evaluate": "8"}
+    icons = {"orchestrator": "0", "sentinel": "1", "planner": "2", "executor": "3",
+             "verifier": "4", "reviewer": "5", "brief": "6", "evaluate": "7"}
     for s in state["trace"]:
         st.markdown(f"`{icons.get(s['node'], '-')}. {s['node']}` {s['summary']}")
 

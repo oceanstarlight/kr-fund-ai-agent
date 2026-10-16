@@ -14,8 +14,10 @@
 | 사건 라이브러리 | `sentinel/events/events.json` | 2008~2025년 22개 사건 (유형, 지역, 전이 경로, 시장 반응 첫 거래일 t0) |
 | 정량 엔진 | `sentinel/quant/` | 엔진 A 팩터모델(주간 Ridge 회귀), 엔진 B 과거사건 재현, 변동성 국면 보정, VaR/CVaR, 자산별 기여도 |
 | Sentinel | `sentinel/monitor.py` | 시장 변수 일간 z-score, GPR 지수 z-score 이상 감지 |
-| Agent 파이프라인 | `sentinel/agents/pipeline.py` | LangGraph: Orchestrator → Sentinel → Event Analyst → Scenario Builder → Quant Engine → Verifier(재분석 루프 최대 2회) → Brief → Evaluate |
-| LLM | `sentinel/agents/llm.py` | 사건 분류(구조화 출력)와 브리프 작성만 담당. Gemini(현재 기본) 또는 Claude 선택. 숫자는 placeholder로만 쓰게 하고 감사 후 치환 |
+| 도구 레이어 | `sentinel/tools.py` | 모든 도구가 값 + 근거(evidence) + 알려진 한계(unknowns)를 함께 반환 |
+| Agent 파이프라인 | `sentinel/agents/pipeline.py` | LangGraph: Orchestrator → Sentinel(코드) → Planner(LLM) → Executor(도구) → Verifier(코드, 실패 시 사유를 붙여 재계획, 최대 2회) → Reviewer(LLM) → Brief(코드) → Evaluate |
+| LLM | `sentinel/agents/llm.py` | Planner: 사건 분류 + 유사 사건 검색 조건 결정. Reviewer: 근거·한계를 보고 확인/주의 판정(주의면 등급 하향) + 해석 작성. 사건당 2회 호출(재계획 시 +1). 숫자는 자리표시자로만 쓰고 감사 후 치환. Gemini(현재 기본) 또는 Claude |
+| MCP 서버 | `sentinel/mcp_server.py` | 도구를 MCP로 공개해 외부 에이전트·사내 시스템이 호출 가능 (`python -m sentinel.mcp_server`) |
 | Replay / 백테스트 | `sentinel/backtest.py` | 사건별 Leave-one-out, 사건 직전 데이터만 사용 |
 | UI | `app/streamlit_app.py` | Replay, Ask, Backtest, 데이터·출처 탭 |
 
@@ -31,7 +33,7 @@ streamlit run app/streamlit_app.py        # 대시보드
 python -m pytest -q                       # 테스트 (네트워크 불필요)
 ```
 
-LLM 사용은 선택입니다. `GEMINI_API_KEY`(현재 기본) 또는 `ANTHROPIC_API_KEY`를 설정하면 사건 분류와 브리프에 LLM을 쓰고, 키가 없으면 규칙 기반 분류와 템플릿 브리프로 동작합니다 (`.env.example` 참고).
+LLM 사용은 선택입니다. `GEMINI_API_KEY`(현재 기본) 또는 `ANTHROPIC_API_KEY`를 설정하면 Planner·Reviewer에 LLM을 쓰고, 키가 없으면 규칙 기반 계획과 템플릿 브리프로 동작합니다. 키는 git에 올리지 않는 `.env`에 둡니다 (`.env.example` 참고).
 
 ## 설계 원칙
 
@@ -43,14 +45,14 @@ LLM 사용은 선택입니다. `GEMINI_API_KEY`(현재 기본) 또는 `ANTHROPIC
 
 | 기간 | 실측 하락 비율 | 방향 적중 | 방향 적중(충격 기준선) | MAE | MAE(0% 기준선) | MAE(충격 기준선) |
 |---|---|---|---|---|---|---|
-| D+1 | 86% | 86% | 86% | 1.06% | 1.31% | 1.39% |
-| D+5 | 67% | 67% | 62% | 1.56% | 1.73% | 1.70% |
-| D+20 | 57% | 48% | 57% | 3.78% | 2.23% | 3.71% |
+| D+1 | 86% | 86% | 86% | 1.08% | 1.31% | 1.39% |
+| D+5 | 67% | 67% | 62% | 1.57% | 1.73% | 1.70% |
+| D+20 | 57% | 48% | 57% | 3.72% | 2.23% | 3.71% |
 
 - 충격 기준선 = 과거 라이브러리 사건 전체의 실측 중앙값(유사도·변동성 보정 없음).
 - **방향 적중률은 기준선과 거의 같습니다.** 충격 사건은 대체로 하락하기 때문에 높은 적중률 자체는 판별력의 증거가 아닙니다.
 - 오차(MAE)는 D+1에서 두 기준선보다 작고, D+5는 근소하게 작으며, **D+20은 0% 기준선보다 나쁩니다.**
-- 예측 구간(하위~상위 25%)의 실측 포함률은 14~43%로 명목 50%보다 낮아 구간이 좁습니다.
+- 예측 구간(하위~상위 25%)의 실측 포함률은 19~38%로 명목 50%보다 낮아 구간이 좁습니다.
 - 상세는 `reports/backtest_*.md`.
 
 ## 한계

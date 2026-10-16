@@ -1,5 +1,11 @@
-"""LangGraph pipeline: orchestrator -> sentinel -> analyst -> scenario -> quant -> verifier
-(-> analyst retry loop) -> brief -> evaluate (replay only).
+"""LangGraph agent: plan -> execute tools -> verify -> review.
+
+    orchestrator -> sentinel (code) -> planner (LLM) -> executor (tools, code)
+      -> verifier (rule checks, code) --fail--> planner (re-plan with feedback, max 2)
+      -> reviewer (LLM: verdict + interpretation) -> brief (code) -> evaluate (replay only)
+
+Every tool returns value + evidence + known unknowns (sentinel/tools.py). LLMs never
+compute numbers; with no API key the planner and reviewer fall back to deterministic code.
 
 Modes
 - ``replay``: a library event is replayed as of its date. Only data visible before the
@@ -17,16 +23,12 @@ from typing import Annotated, Any, TypedDict
 import pandas as pd
 from langgraph.graph import END, START, StateGraph
 
-from sentinel import config
+from sentinel import config, tools
 from sentinel.agents import llm
 from sentinel.data.store import MarketData
 from sentinel.data.universe import ASSETS, FACTORS, normalize
-from sentinel.events.library import Event, find_analogs, load_events
-from sentinel.monitor import detect
-from sentinel.quant import betas as betas_mod
-from sentinel.quant.engines import HorizonImpact, portfolio_impact, realized
-from sentinel.quant.risk import historical_var
-from sentinel.quant.scenario import analog_eligibility, analog_windows, scenario_table
+from sentinel.events.library import Event, load_events
+from sentinel.quant.engines import HorizonImpact, realized
 
 
 class State(TypedDict, total=False):
@@ -45,6 +47,7 @@ class State(TypedDict, total=False):
     session: pd.Timestamp
     base: pd.Timestamp
     detection: dict
+    plan: dict
     classification: dict
     classifier: str
     attempt: int
@@ -53,7 +56,9 @@ class State(TypedDict, total=False):
     impacts: dict[int, HorizonImpact]
     betas: Any
     risk: dict
+    tool_results: dict[str, tools.ToolResult]
     verification: dict
+    review: dict | None
     facts: dict
     brief: str
     brief_engine: str
@@ -71,38 +76,38 @@ def orchestrator(state: State) -> dict:
     mode = state.get("mode", "replay")
     weights = normalize(state["weights"])
     horizons = tuple(state.get("horizons") or config.HORIZONS)
-    out: dict = {"weights": weights, "horizons": horizons, "attempt": 0, "mode": mode}
+    out: dict = {"weights": weights, "horizons": horizons, "attempt": 0, "mode": mode, "tool_results": {}}
     if mode == "replay":
         ev = next(e for e in load_events() if e.id == state["event_id"])
         session = md.trading_day_on_or_after(ev.t0)
         base = md.trading_day_before(ev.t0)
         out.update(event=ev, session=session, base=base, event_text=ev.description)
-        plan = f"Replay: '{ev.name}' 기준일 {base.date()} 종가 이전 데이터만 사용"
+        msg = f"Replay: '{ev.name}' 기준일 {base.date()} 종가 이전 데이터만 사용"
     else:
         base = md.last_date
         out.update(event=None, session=base, base=base)
-        plan = f"{'질의' if mode == 'ask' else '감시'} 모드: 최신 종가 {base.date()} 기준"
-    return {**out, **_step("orchestrator", plan)}
+        msg = f"{'질의' if mode == 'ask' else '감시'} 모드: 최신 종가 {base.date()} 기준"
+    return {**out, **_step("orchestrator", msg)}
 
 
 def sentinel_node(state: State) -> dict:
-    md = state["md"]
     ev = state.get("event")
-    session = state["session"]
-    det = detect(md.truncate(session), session, ev.date if ev else None)
+    r = tools.detect_signals(state["md"], state["session"], ev.date if ev else None)
+    det = r.value
     top = ", ".join(f"{s['name']} z={s['z']:+.1f}" for s in det["top"])
     status = "이상 신호 감지" if det["triggered"] else "임계값 미달"
-    return {"detection": det, **_step("sentinel", f"{status}: {top}")}
+    return {"detection": det, "tool_results": {**state["tool_results"], r.tool: r},
+            **_step("sentinel", f"{status}: {top} (코드, LLM 미사용)")}
+
+
+def route_after_orchestrator(state: State) -> str:
+    return "planner" if state["mode"] == "ask" else "sentinel"
 
 
 def route_after_sentinel(state: State) -> str:
     if state["mode"] == "monitor" and not state["detection"]["triggered"]:
         return "end"
-    return "analyst"
-
-
-def route_after_orchestrator(state: State) -> str:
-    return "analyst" if state["mode"] == "ask" else "sentinel"
+    return "planner"
 
 
 def _signals_text(det: dict) -> str:
@@ -110,71 +115,45 @@ def _signals_text(det: dict) -> str:
     return "Market anomaly detected: " + "; ".join(parts)
 
 
-def analyst_node(state: State) -> dict:
-    md = state["md"]
+def planner_node(state: State) -> dict:
     attempt = state.get("attempt", 0)
     ev: Event | None = state.get("event")
-    if "classification" in state and state.get("classification"):
-        cls, engine = state["classification"], state["classifier"]
-    elif ev is not None:
-        cls, engine = {**ev.tags(), "headline_ko": ev.name, "rationale_ko": ev.note or ev.description}, "library"
-    else:
-        text = state.get("event_text") or _signals_text(state.get("detection", {}))
-        c, engine = llm.classify_event(text)
-        cls = c.model_dump()
-
-    # Retry strategy chosen by the verifier loop: widen or tighten the analog set.
-    k, min_sim, same_type = config.ANALOG_K, config.ANALOG_MIN_SIMILARITY, False
-    if attempt == 1:
-        k, min_sim, same_type = config.ANALOG_K + 2, 0.15, True
-    elif attempt >= 2:
-        k, min_sim, same_type = config.ANALOG_K + 5, 0.05, False
-
-    eligible = analog_eligibility(md, state["base"], max(state["horizons"]))
-    analogs = find_analogs(
-        cls, load_events(), cutoff=state["base"], k=k, min_similarity=min_sim,
-        exclude_id=ev.id if ev else None, same_type_only=same_type, eligible=eligible,
-    )
-    if attempt == 1 and len(analogs) < config.ANALOG_MIN:
-        analogs = find_analogs(
-            cls, load_events(), cutoff=state["base"], k=k, min_similarity=min_sim,
-            exclude_id=ev.id if ev else None, eligible=eligible,
-        )
-    names = ", ".join(f"{a.event.name}({a.similarity:.2f})" for a in analogs)
-    summary = f"[시도 {attempt + 1}] 분류 {cls['type']}/{cls['region']} ({engine}) → 유사 사건 {len(analogs)}건: {names}"
-    return {"classification": cls, "classifier": engine, "analogs": analogs, **_step("analyst", summary)}
-
-
-def scenario_node(state: State) -> dict:
-    md = state["md"].truncate(state["base"])
-    scen = {}
-    for h in state["horizons"]:
-        scen[h] = {"windows": analog_windows(md, state["analogs"], h)}
-        scen[h]["table"] = scenario_table(scen[h]["windows"])
-    t = scen[config.PRIMARY_HORIZON]["table"] if config.PRIMARY_HORIZON in scen else next(iter(scen.values()))["table"]
-    if t.empty:
-        summary = "유사 사건 구간 없음"
-    else:
-        summary = "D+%d 기본 시나리오(중앙값): " % config.PRIMARY_HORIZON + ", ".join(
-            f"{r['name']} {_fmt_factor(r['q50'], k)}" for k, r in t.iterrows()
-        )
-    return {"scenario": scen, **_step("scenario_builder", summary)}
-
-
-def quant_node(state: State) -> dict:
-    md = state["md"].truncate(state["base"])
-    w = state["weights"]
-    b = betas_mod.estimate_betas(md, state["base"], list(w))
-    impacts, risk = {}, {}
-    for h in state["horizons"]:
-        impacts[h] = portfolio_impact(md, w, state["scenario"][h]["windows"], b, h, state.get("vol_scale", True))
-        risk[h] = historical_var(md, w, state["base"], h)
-    p = impacts.get(config.PRIMARY_HORIZON) or next(iter(impacts.values()))
+    tags = {**ev.tags(), "headline_ko": ev.name, "rationale_ko": ev.note or ev.description} if ev else None
+    text = state.get("event_text") or _signals_text(state.get("detection", {}))
+    feedback = (state.get("verification") or {}).get("feedback") if attempt else None
+    plan, engine = llm.plan_event(text, attempt, tags, feedback)
+    cls = plan.classification.model_dump()
     summary = (
-        f"D+{p.horizon} 포트폴리오: 엔진A {p.engine_a['q50']:+.2%}, 엔진B {p.engine_b['q50']:+.2%}, "
-        f"통합 {p.blend['q50']:+.2%} (불리 {p.blend['q25']:+.2%})"
+        f"[계획 {attempt + 1}] 분류 {cls['type']}/{cls['region']}/{','.join(cls['channels'])} ({engine}); "
+        f"유사 사건 최대 {plan.analog_k}건, 최소 유사도 {plan.min_similarity:.2f}"
+        f"{', 동일 유형만' if plan.same_type_only else ''} - {plan.rationale_ko}"
     )
-    return {"betas": b, "impacts": impacts, "risk": risk, **_step("quant_engine", summary)}
+    return {"plan": plan.model_dump(), "classification": cls, "classifier": engine, **_step("planner", summary)}
+
+
+def executor_node(state: State) -> dict:
+    plan = state["plan"]
+    ev = state.get("event")
+    ctx = tools.ToolContext(state["md"], state["weights"], state["base"], ev.id if ev else None)
+    results = dict(state["tool_results"])
+    r_an = tools.search_analogs(ctx, state["classification"], plan["analog_k"], plan["min_similarity"], plan["same_type_only"])
+    r_sc = tools.build_scenario(ctx, r_an.value, state["horizons"])
+    r_be = tools.estimate_sensitivities(ctx)
+    r_im = tools.compute_impact(ctx, r_sc.value, r_be.value, state.get("vol_scale", True))
+    r_rk = tools.historical_risk(ctx, state["horizons"])
+    for r in (r_an, r_sc, r_be, r_im, r_rk):
+        results[r.tool] = r
+    p = r_im.value.get(config.PRIMARY_HORIZON) or next(iter(r_im.value.values()))
+    names = ", ".join(f"{a.event.name}({a.similarity:.2f})" for a in r_an.value)
+    summary = (
+        f"도구 5종 실행: 유사 사건 {len(r_an.value)}건 [{names}] → D+{p.horizon} 엔진A {p.engine_a['q50']:+.2%}, "
+        f"엔진B {p.engine_b['q50']:+.2%}, 통합 {p.blend['q50']:+.2%} (불리 {p.blend['q25']:+.2%}); "
+        f"보고된 한계 {len(tools.unknowns_of(list(results.values())))}건"
+    )
+    return {
+        "analogs": r_an.value, "scenario": r_sc.value, "betas": r_be.value, "impacts": r_im.value,
+        "risk": r_rk.value, "tool_results": results, **_step("executor", summary),
+    }
 
 
 def verifier_node(state: State) -> dict:
@@ -191,7 +170,6 @@ def verifier_node(state: State) -> dict:
     checks.append({"check": "민감도 추정 커버리지", "ok": beta_cov >= 0.95, "detail": f"비중 {beta_cov:.0%}"})
     proxy_ok = p.backfilled_weight <= 0.2
     checks.append({"check": "프록시 데이터 비중", "ok": proxy_ok, "detail": f"최대 {p.backfilled_weight:.0%}"})
-
     sims = [a.similarity for a in state["analogs"]]
     mean_sim = sum(sims) / len(sims) if sims else 0.0
     checks.append({"check": "유사도 평균", "ok": mean_sim >= 0.35, "detail": f"{mean_sim:.2f} (기준 0.35)"})
@@ -204,16 +182,47 @@ def verifier_node(state: State) -> dict:
         grade = "B"
     else:
         grade = "C"
-    verdict = "재분석 요청" if retry else f"통과 (신뢰도 {grade})"
+    feedback = [f"{c['check']} 실패: {c['detail']}" for c in checks if not c["ok"]]
+    verdict = "재계획 요청" if retry else f"통과 (규칙 등급 {grade})"
     summary = f"{verdict}: " + "; ".join(f"{c['check']} {'OK' if c['ok'] else 'NG'}({c['detail']})" for c in checks)
-    out = {"verification": {"checks": checks, "grade": grade, "retry": retry, "attempts": attempt + 1}}
+    out = {"verification": {"checks": checks, "grade": grade, "rule_grade": grade, "retry": retry,
+                            "attempts": attempt + 1, "feedback": feedback}}
     if retry:
         out["attempt"] = attempt + 1
     return {**out, **_step("verifier", summary)}
 
 
 def route_after_verifier(state: State) -> str:
-    return "analyst" if state["verification"]["retry"] else "brief"
+    return "planner" if state["verification"]["retry"] else "reviewer"
+
+
+_DOWNGRADE = {"A": "B", "B": "C", "C": "C"}
+
+
+def reviewer_node(state: State) -> dict:
+    facts = build_facts(state)
+    unknowns = tools.unknowns_of(list(state["tool_results"].values()))
+    context = {
+        "classification": {k: state["classification"].get(k) for k in ("type", "region", "channels")},
+        # Names, pass/fail and digit-free unknowns only: numeric details would tempt the LLM to copy numbers.
+        "rule_checks": [{"check": c["check"], "ok": c["ok"]} for c in state["verification"]["checks"]],
+        "known_unknowns": [{"code": u.code, "message": u.message} for u in unknowns],
+    }
+    review, problems = llm.review_result(facts, context)
+    verification = dict(state["verification"])
+    if review is None:
+        if problems == ["llm unavailable"]:
+            why = "LLM 미사용 → 규칙 등급 유지"
+        elif any("error" in p or "no result" in p for p in problems):
+            why = f"LLM 호출 실패 → 규칙 등급 유지 ({'; '.join(problems)})"
+        else:
+            why = f"LLM 검토문 감사 실패 → 폐기, 규칙 등급 유지 ({'; '.join(problems)})"
+        return {"review": None, "verification": verification, **_step("reviewer", why)}
+    if review.verdict == "caution":
+        verification["grade"] = _DOWNGRADE[verification["grade"]]
+    why = (f"LLM({llm.provider()}) 검토: {'주의' if review.verdict == 'caution' else '확인'}"
+           f" → 최종 등급 {verification['grade']}; 우려 {len(review.concerns_ko)}건; 수치 감사 통과")
+    return {"review": review.model_dump(), "verification": verification, **_step("reviewer", why)}
 
 
 def _fmt_factor(v: float, key: str) -> str:
@@ -324,26 +333,27 @@ def template_brief(facts: dict[str, str], state: State) -> str:
     return "\n\n".join([summary_section(facts), data_sections(facts, state), CAVEATS])
 
 
+def unknowns_section(state: State) -> str:
+    unk = tools.unknowns_of(list(state["tool_results"].values()))
+    if not unk:
+        return "### 도구가 보고한 한계\n- 없음"
+    return "### 도구가 보고한 한계\n" + "\n".join(
+        f"- {u.message}" + (f" ({u.detail})" if u.detail else "") for u in unk
+    )
+
+
 def brief_node(state: State) -> dict:
     facts = build_facts(state)
-    context = {
-        "classification": {k: state["classification"].get(k) for k in ("type", "region", "channels")},
-        # Only names and pass/fail: numeric details would tempt the LLM to copy numbers.
-        "verification": [{"check": c["check"], "ok": c["ok"]} for c in state["verification"]["checks"]],
-    }
-    narrative, problems = llm.write_brief_llm(facts, context)
-    if narrative is None:
-        text, engine = template_brief(facts, state), "template"
-        if problems == ["llm unavailable"]:
-            why = "LLM 미사용"
-        elif any("error" in p or "no text" in p for p in problems):
-            why = f"LLM 호출 실패 → 템플릿 대체 ({'; '.join(problems)})"
-        else:
-            why = f"LLM 결과 감사 실패 → 템플릿 대체 ({'; '.join(problems)})"
-    else:
-        text = "\n\n".join([summary_section(facts), narrative, data_sections(facts, state), CAVEATS])
-        engine, why = "llm", f"LLM({llm.provider()}) 해설 작성, 수치 감사 통과"
-    return {"facts": facts, "brief": text, "brief_engine": engine, **_step("brief", why)}
+    review = state.get("review")
+    parts = [summary_section(facts)]
+    if review:
+        parts.append(review["interpretation_md"])
+        if review["concerns_ko"]:
+            parts.append("### 검토 의견\n" + "\n".join(f"- {c}" for c in review["concerns_ko"]))
+    parts += [data_sections(facts, state), unknowns_section(state), CAVEATS]
+    engine = "llm" if review else "template"
+    return {"facts": facts, "brief": "\n\n".join(parts), "brief_engine": engine,
+            **_step("brief", "브리프 조립 (표·수치는 코드, 해석은 " + ("LLM)" if review else "생략)"))}
 
 
 def route_after_brief(state: State) -> str:
@@ -379,19 +389,19 @@ def build_graph():
     g = StateGraph(State)
     g.add_node("orchestrator", orchestrator)
     g.add_node("sentinel", sentinel_node)
-    g.add_node("analyst", analyst_node)
-    g.add_node("scenario_builder", scenario_node)
-    g.add_node("quant_engine", quant_node)
+    g.add_node("planner", planner_node)
+    g.add_node("executor", executor_node)
     g.add_node("verifier", verifier_node)
+    g.add_node("reviewer", reviewer_node)
     g.add_node("brief", brief_node)
     g.add_node("evaluate", evaluate_node)
     g.add_edge(START, "orchestrator")
-    g.add_conditional_edges("orchestrator", route_after_orchestrator, {"sentinel": "sentinel", "analyst": "analyst"})
-    g.add_conditional_edges("sentinel", route_after_sentinel, {"analyst": "analyst", "end": END})
-    g.add_edge("analyst", "scenario_builder")
-    g.add_edge("scenario_builder", "quant_engine")
-    g.add_edge("quant_engine", "verifier")
-    g.add_conditional_edges("verifier", route_after_verifier, {"analyst": "analyst", "brief": "brief"})
+    g.add_conditional_edges("orchestrator", route_after_orchestrator, {"sentinel": "sentinel", "planner": "planner"})
+    g.add_conditional_edges("sentinel", route_after_sentinel, {"planner": "planner", "end": END})
+    g.add_edge("planner", "executor")
+    g.add_edge("executor", "verifier")
+    g.add_conditional_edges("verifier", route_after_verifier, {"planner": "planner", "reviewer": "reviewer"})
+    g.add_edge("reviewer", "brief")
     g.add_conditional_edges("brief", route_after_brief, {"evaluate": "evaluate", "end": END})
     g.add_edge("evaluate", END)
     return g.compile()

@@ -1,8 +1,13 @@
-"""Claude calls with deterministic fallbacks.
+"""LLM roles with deterministic fallbacks (Gemini or Claude).
 
-LLMs only classify events and write prose. Every number shown to the user comes from the
-quant tools; the brief writer must reference numbers through ``[[fact_key]]`` placeholders,
-which are substituted afterwards and audited (see ``audit_brief``).
+Two calls per analyzed event:
+- Planner: classifies the event and chooses analog-search parameters (structured output).
+  On a failed rule check it re-plans with the verifier's feedback.
+- Reviewer: reads the tool evidence and known unknowns, gives a confirm/caution verdict and
+  writes the interpretation section.
+
+LLMs never produce numbers. Text may reference figures only through ``[[fact_key]]``
+placeholders, which are audited and substituted by code (see ``audit_brief``).
 """
 
 from __future__ import annotations
@@ -15,6 +20,9 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from sentinel import config
+from sentinel.tools import TOOL_CATALOG
+
+TOOL_NAMES = TOOL_CATALOG
 
 EventType = Literal[
     "war", "military_strike", "trade", "energy_supply", "financial_stress",
@@ -98,11 +106,40 @@ def _gemini():
 
 
 # --------------------------------------------------------------------- classification
-CLASSIFY_SYSTEM = (
-    "You classify geopolitical and macro events for an institutional investor's risk monitor. "
-    "Pick the event type, the primary region, and the market transmission channels that a "
-    "portfolio manager would expect to matter in the first weeks. Use only the allowed labels. "
-    "Write headline_ko and rationale_ko in Korean."
+class Plan(BaseModel):
+    classification: EventClassification
+    analog_k: int = Field(description="How many historical analogs to use, 3-10")
+    min_similarity: float = Field(description="Minimum tag similarity for an analog, 0.05-0.6")
+    same_type_only: bool = Field(description="Restrict analogs to the same event type")
+    rationale_ko: str = Field(description="1-2 Korean sentences on why this plan")
+
+
+class Review(BaseModel):
+    verdict: Literal["confirm", "caution"]
+    concerns_ko: list[str] = Field(description="Up to 3 short Korean concerns; empty if none")
+    interpretation_md: str = Field(description="Markdown section starting with '### 해석' and 3-5 bullets")
+
+
+PLANNER_SYSTEM = (
+    "You are the planner of a geopolitical/macro risk agent for institutional investors. "
+    "Given an event report (and, when present, curated tags or verifier feedback), output a "
+    "plan: classify the event with the allowed labels, and choose analog-search parameters "
+    "for the deterministic tools. Prefer fewer but closer analogs when the event type is "
+    "common; widen the search (more analogs, lower similarity, not same-type) when feedback "
+    "says analogs are too few or the two engines disagree. Write Korean text fields in Korean."
+)
+
+REVIEWER_SYSTEM = (
+    "You are the final reviewer of a risk agent's output for an institutional investor. "
+    "You receive FACTS (figures, referenced only by key), the event classification, the rule "
+    "checks, and the tools' known unknowns. Tasks: (1) verdict 'caution' if the unknowns or "
+    "failed checks materially limit the result, else 'confirm'; (2) up to three concerns; "
+    "(3) an interpretation section.\n"
+    "Rules for all text: never type a digit. Mention a figure only as a placeholder [[key]] "
+    "using keys from FACTS. Horizons may be written as D+1, D+5 or D+20. Do not write labels "
+    "with digits (no 'Q50', 'VaR95', '1위', '95%'); use words such as '기본 시나리오', "
+    "'불리 시나리오', '과거 위험가치'. Describe estimates as expectations, not observations. "
+    "Do not add facts that are not given. No investment advice. Write in Korean."
 )
 
 _RULES: list[tuple[str, dict]] = [
@@ -153,67 +190,108 @@ def classify_rules(text: str) -> EventClassification:
     )
 
 
-def _classify_anthropic(text: str) -> EventClassification | None:
+
+def classify_rules(text: str) -> EventClassification:
+    t = text.lower()
+    found = {"type": "political", "channels": ["risk_off"]}
+    for pat, val in _RULES:
+        if re.search(pat, t):
+            found = val
+            break
+    region = next((r for pat, r in _REGIONS if re.search(pat, t)), "global")
+    channels = list(dict.fromkeys(found["channels"] + [c for pat, c in _EXTRA_CHANNELS if re.search(pat, t)]))
+    return EventClassification(
+        type=found["type"],
+        region=region,
+        channels=channels[:5],
+        headline_ko=text.strip().splitlines()[0][:80],
+        rationale_ko="키워드 규칙 기반 분류(LLM 미사용).",
+    )
+
+
+def _structured_anthropic(schema, system: str, user: str, smart: bool):
     resp = _anthropic().messages.parse(
-        model=models()[0],
-        max_tokens=2048,
-        system=CLASSIFY_SYSTEM,
-        messages=[{"role": "user", "content": f"Event report:\n{text}"}],
-        output_format=EventClassification,
+        model=models()[1 if smart else 0],
+        max_tokens=4000,
+        system=system,
+        messages=[{"role": "user", "content": user}],
+        output_format=schema,
     )
     if resp.stop_reason == "refusal":
         return None
     return resp.parsed_output
 
 
-def _classify_gemini(text: str) -> EventClassification | None:
+def _structured_gemini(schema, system: str, user: str, smart: bool):
     from google.genai import types
 
     resp = _gemini().models.generate_content(
-        model=models()[0],
-        contents=f"Event report:\n{text}",
+        model=models()[1 if smart else 0],
+        contents=user,
         config=types.GenerateContentConfig(
-            system_instruction=CLASSIFY_SYSTEM,
+            system_instruction=system,
             response_mime_type="application/json",
-            response_schema=EventClassification,
-            max_output_tokens=1024,
-            temperature=0.0,
+            response_schema=schema,
+            max_output_tokens=3000,
+            temperature=0.1,
         ),
     )
-    if isinstance(resp.parsed, EventClassification):
+    if isinstance(resp.parsed, schema):
         return resp.parsed
-    return EventClassification.model_validate_json(resp.text) if resp.text else None
+    return schema.model_validate_json(resp.text) if resp.text else None
+
+
+def structured_call(schema, system: str, user: str, smart: bool = False):
+    """Returns (parsed object or None, error string or None)."""
+    p = provider()
+    if p == "none":
+        return None, "llm unavailable"
+    fn = _structured_gemini if p == "gemini" else _structured_anthropic
+    try:
+        out = _with_retry(fn, schema, system, user, smart)
+    except Exception as exc:  # network/API failure must not break the pipeline
+        return None, f"{p} error: {type(exc).__name__}"
+    return (out, None) if out is not None else (None, f"{p} returned no result")
+
+
+# ----------------------------------------------------------------------------- planner
+def plan_rules(text: str, attempt: int, tags: dict | None = None) -> Plan:
+    """Deterministic planner: curated tags or keyword rules, widening the search on retries."""
+    cls = EventClassification(**{**tags, "headline_ko": tags.get("headline_ko", text[:80]),
+                                 "rationale_ko": tags.get("rationale_ko", "")}) if tags else classify_rules(text)
+    k, min_sim, same = config.ANALOG_K, config.ANALOG_MIN_SIMILARITY, False
+    if attempt == 1:
+        k, min_sim, same = config.ANALOG_K + 2, 0.15, True
+    elif attempt >= 2:
+        k, min_sim, same = config.ANALOG_K + 5, 0.05, False
+    return Plan(classification=cls, analog_k=k, min_similarity=min_sim, same_type_only=same,
+                rationale_ko=f"규칙 기반 계획 (시도 {attempt + 1})")
+
+
+def plan_event(text: str, attempt: int = 0, tags: dict | None = None, feedback: list[str] | None = None) -> tuple[Plan, str]:
+    """Returns (plan, engine). Curated tags, when given, override the LLM's classification."""
+    if not llm_available():
+        return plan_rules(text, attempt, tags), "rules"
+    user = json.dumps(
+        {"event_report": text, "curated_tags": tags, "attempt": attempt + 1,
+         "verifier_feedback": feedback or [], "tools": TOOL_NAMES},
+        ensure_ascii=False,
+    )
+    plan, err = structured_call(Plan, PLANNER_SYSTEM, user, smart=False)
+    if plan is None:
+        return plan_rules(text, attempt, tags), f"rules ({err})"
+    if tags:  # replay: keep the curated ground-truth tags, let the LLM choose search parameters
+        plan.classification = EventClassification(**{**plan.classification.model_dump(), **{
+            k: tags[k] for k in ("type", "region", "channels")}})
+    return plan, f"llm:{provider()}"
 
 
 def classify_event(text: str) -> tuple[EventClassification, str]:
-    """Returns (classification, engine) where engine is 'llm:<provider>' or 'rules...'."""
-    p = provider()
-    if p == "none":
-        return classify_rules(text), "rules"
-    try:
-        out = _with_retry(_classify_gemini if p == "gemini" else _classify_anthropic, text)
-    except Exception as exc:  # network/API failure must not break the pipeline
-        return classify_rules(text), f"rules ({p} error: {type(exc).__name__})"
-    if out is None:
-        return classify_rules(text), f"rules ({p} returned no result)"
-    return out, f"llm:{p}"
+    plan, engine = plan_event(text)
+    return plan.classification, engine
 
 
-# ---------------------------------------------------------------------------- brief
-BRIEF_SYSTEM = (
-    "You write the interpretation section of a Korean 'Impact Brief' for an institutional "
-    "investor's risk team. Tables with the numbers are added by code; you only explain them.\n"
-    "Rules:\n"
-    "1. Output exactly one Markdown section starting with '### 해석' and 3-5 bullet points.\n"
-    "2. Never type a digit. To mention a figure, write a placeholder [[key]] using only keys "
-    "from FACTS. Horizons may be written as D+1, D+5 or D+20. Do not write labels that contain "
-    "digits (no 'Q50', 'VaR95', '1위', '95%'); use words such as '기본 시나리오', '불리 시나리오', "
-    "'과거 위험가치'.\n"
-    "3. Do not add facts that are not in FACTS or CONTEXT. Explain which transmission channels "
-    "drive the result, which assets dominate the loss, and how much to trust it.\n"
-    "4. Be concise and factual. No investment advice."
-)
-
+# ---------------------------------------------------------------------------- reviewer
 _PLACEHOLDER = re.compile(r"\[\[([a-zA-Z0-9_]+)\]\]")
 _ALLOWED_DIGITS = re.compile(r"D\+(?:1|5|20)\b|^\s*\d+\.\s", re.MULTILINE)
 # Numbers spelled out in words would bypass the digit check.
@@ -256,44 +334,27 @@ def fill_placeholders(raw: str, facts: dict[str, str]) -> str:
     return _PLACEHOLDER.sub(lambda m: facts.get(m.group(1), m.group(0)), raw)
 
 
-def _brief_anthropic(payload: str) -> str | None:
-    resp = _anthropic().messages.create(
-        model=models()[1],
-        max_tokens=4000,
-        system=BRIEF_SYSTEM,
-        messages=[{"role": "user", "content": payload}],
-    )
-    if resp.stop_reason == "refusal":
-        return None
-    return "".join(b.text for b in resp.content if b.type == "text")
+def _normalize_md(md: str) -> str:
+    """Some models return bullets on one line ('### 해석* a* b'); put each bullet on its own line."""
+    md = md.strip()
+    if "\n" in md or "**" in md:  # already multi-line, or bold markers we must not split
+        return md
+    md = re.sub(r"^(#{1,6} [^*-]+?)\s*(?=[*-] )", r"\1\n", md)
+    return re.sub(r"(?<!\n)\s*\*\s+(?=\S)", "\n- ", md)
 
 
-def _brief_gemini(payload: str) -> str | None:
-    from google.genai import types
-
-    resp = _gemini().models.generate_content(
-        model=models()[1],
-        contents=payload,
-        config=types.GenerateContentConfig(
-            system_instruction=BRIEF_SYSTEM, max_output_tokens=4000, temperature=0.2
-        ),
-    )
-    return resp.text
-
-
-def write_brief_llm(facts: dict[str, str], context: dict) -> tuple[str | None, list[str]]:
-    """Returns (filled brief or None, audit problems)."""
-    p = provider()
-    if p == "none":
+def review_result(facts: dict[str, str], context: dict) -> tuple[Review | None, list[str]]:
+    """Final LLM review. Returns (review or None, problems). Text is audited and filled."""
+    if not llm_available():
         return None, ["llm unavailable"]
     payload = json.dumps({"FACTS": facts, "CONTEXT": context}, ensure_ascii=False, indent=1)
-    try:
-        raw = _with_retry(_brief_gemini if p == "gemini" else _brief_anthropic, payload)
-    except Exception as exc:
-        return None, [f"{p} error: {type(exc).__name__}"]
-    if not raw:
-        return None, [f"{p} returned no text"]
-    problems = audit_brief(raw, facts)
+    review, err = structured_call(Review, REVIEWER_SYSTEM, payload, smart=True)
+    if review is None:
+        return None, [err or "no result"]
+    text = review.interpretation_md + "\n" + "\n".join(review.concerns_ko)
+    problems = audit_brief(text, facts)
     if problems:
         return None, problems
-    return fill_placeholders(raw, facts), []
+    review.interpretation_md = _normalize_md(fill_placeholders(review.interpretation_md, facts))
+    review.concerns_ko = [fill_placeholders(c, facts) for c in review.concerns_ko[:3]]
+    return review, []

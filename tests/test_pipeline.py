@@ -9,7 +9,7 @@ def test_replay_runs_end_to_end(synthetic_md):
     st = run(synthetic_md, PRESETS["sovereign"].weights, mode="replay", event_id="2024-iran-israel", aum=1e9)
     nodes = [s["node"] for s in st["trace"]]
     assert nodes[0] == "orchestrator" and nodes[-1] == "evaluate"
-    assert "verifier" in nodes and "brief" in nodes
+    assert {"planner", "executor", "verifier", "reviewer", "brief"} <= set(nodes)
     assert st["base"] < pd.Timestamp("2024-04-15")
     assert st["brief_engine"] == "template"
     assert set(st["realized"]) == {1, 5, 20}
@@ -19,8 +19,8 @@ def test_verifier_retry_loop_is_bounded(synthetic_md):
     # The earliest events have almost no eligible analogs, forcing retries.
     st = run(synthetic_md, PRESETS["balanced"].weights, mode="replay", event_id="2011-fukushima")
     nodes = [s["node"] for s in st["trace"]]
-    assert nodes.count("analyst") == st["verification"]["attempts"]
-    assert nodes.count("analyst") <= 3
+    assert nodes.count("planner") == st["verification"]["attempts"]
+    assert nodes.count("planner") <= 3
     assert st["verification"]["grade"] == "C"
 
 
@@ -92,10 +92,52 @@ def test_gemini_failure_falls_back_to_rules(monkeypatch):
     monkeypatch.delenv("SENTINEL_DISABLE_LLM", raising=False)
     monkeypatch.setenv("GEMINI_API_KEY", "invalid-key-for-test")
 
-    def boom(_text):
+    def boom(*_args):
         raise RuntimeError("network down")
 
-    monkeypatch.setattr(llm, "_classify_gemini", boom)
-    c, engine = llm.classify_event("Iran missile strike on Israel")
+    monkeypatch.setattr(llm, "_structured_gemini", boom)
+    plan, engine = llm.plan_event("Iran missile strike on Israel")
     assert engine.startswith("rules (gemini error")
-    assert c.region == "middle_east"
+    assert plan.classification.region == "middle_east"
+    review, problems = llm.review_result({"x": "1"}, {})
+    assert review is None and problems[0].startswith("gemini error")
+
+
+def test_llm_planner_and_reviewer_path(synthetic_md, monkeypatch):
+    """Simulated LLM: planner widens search on feedback, reviewer caution downgrades the grade."""
+    monkeypatch.delenv("SENTINEL_DISABLE_LLM", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "fake")
+    calls = []
+
+    def fake(schema, system, user, smart):
+        calls.append(schema.__name__)
+        if schema is llm.Plan:
+            return llm.Plan(
+                classification=llm.EventClassification(type="military_strike", region="middle_east",
+                                                       channels=["oil", "risk_off"], headline_ko="h", rationale_ko="r"),
+                analog_k=5, min_similarity=0.3, same_type_only=False, rationale_ko="계획")
+        return llm.Review(verdict="caution", concerns_ko=["유사 사건 수가 적음"],
+                          interpretation_md="### 해석\n- D+5 기본 시나리오는 [[port_q50_5d]] 입니다.")
+
+    monkeypatch.setattr(llm, "_structured_gemini", fake)
+    st = run(synthetic_md, PRESETS["balanced"].weights, mode="ask", event_text="Iran strikes")
+    assert calls[0] == "Plan" and calls[-1] == "Review"
+    assert st["classifier"] == "llm:gemini"
+    assert st["brief_engine"] == "llm"
+    assert st["verification"]["grade"] != st["verification"]["rule_grade"] or st["verification"]["rule_grade"] == "C"
+    assert "[[" not in st["brief"] and "### 검토 의견" in st["brief"]
+
+
+def test_reviewer_text_with_free_numbers_is_rejected(synthetic_md, monkeypatch):
+    monkeypatch.delenv("SENTINEL_DISABLE_LLM", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "fake")
+
+    def fake(schema, system, user, smart):
+        if schema is llm.Plan:
+            return llm.plan_rules("Iran strikes", 0)
+        return llm.Review(verdict="confirm", concerns_ko=[], interpretation_md="### 해석\n- 손실은 약 3% 예상")
+
+    monkeypatch.setattr(llm, "_structured_gemini", fake)
+    st = run(synthetic_md, PRESETS["balanced"].weights, mode="ask", event_text="Iran strikes")
+    assert st["review"] is None and st["brief_engine"] == "template"
+    assert "손실은 약" not in st["brief"]
