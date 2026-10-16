@@ -91,6 +91,7 @@
 | ⑥ Track & Calibrate | 사건 후 실측 수익률과 예측 비교, 오차 분해, 모델 보정 | 성적표(Track Record) |
 | ⑦ Ask | "대만 해협 리스크에 우리 노출은?" 같은 자연어 질의 → Agent가 필요한 도구를 골라 분석 | 답변 + 근거 수치 |
 | ⑧ Replay | 과거 사건을 실시간처럼 재생해 Agent 동작과 정확도를 검증 | 시연·백테스트 |
+| ⑨ Shock Map | 월드맵 위 사건 발생국에서 퍼지는 원(사건 강도 비례) + 포트폴리오 노출 지역으로 이어지는 전이 경로(손익 영향 비례) 애니메이션 | 지도 시각화 |
 
 ### 3.4 사용자 시나리오 (연기금 리스크관리팀)
 ```
@@ -259,7 +260,7 @@ flowchart TD
 | 우선순위 | 기능 |
 |---|---|
 | P0 (필수) | 데이터 수집·캐시, 정량 엔진 A/B, 사건 라이브러리, Replay 모드, LangGraph 파이프라인(감지→분석→시나리오→계산→검증→브리프), Streamlit 대시보드, 백테스트 리포트 |
-| P1 | 주기 감시(GitHub Actions), Tracker 실측 비교·보정, Ask 질의 모드, 포트폴리오 CSV 업로드 |
+| P1 | 주기 감시(GitHub Actions), Tracker 실측 비교·보정, Ask 질의 모드, 포트폴리오 CSV 업로드, Shock Map 월드맵 시각화 |
 | P2 | Policy Check(IPS RAG), 기업 DCF Drill-down, 대체자산 보정, 브리프 PDF 내보내기, 알림 |
 
 ### 6.2 기술 스택
@@ -272,7 +273,7 @@ flowchart TD
 | 저장 | SQLite (로컬) / Supabase 무료 플랜 (배포) |
 | 스케줄링 | GitHub Actions cron (감시 루프) |
 | UI·배포 | Streamlit + Streamlit Community Cloud |
-| 시각화 | Plotly |
+| 시각화 | Plotly (차트, 월드맵 scattergeo·애니메이션) |
 | 품질 | pytest (정량 함수 단위 테스트), 백테스트 스크립트 |
 
 ### 6.3 배포 구조
