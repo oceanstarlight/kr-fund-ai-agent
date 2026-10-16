@@ -20,7 +20,8 @@ from sentinel import config, gdelt_monitor, geo, shock_map  # noqa: E402
 from sentinel.agents import llm as llm_mod  # noqa: E402
 from sentinel.agents.llm import llm_available, models, provider  # noqa: E402
 from sentinel.agents.pipeline import run  # noqa: E402
-from sentinel.backtest import run_backtest, summarize  # noqa: E402
+from sentinel import tools  # noqa: E402
+from sentinel.backtest import run_backtest, summarize, summarize_detection  # noqa: E402
 from sentinel.data.cache import cache_exists, load_manifest  # noqa: E402
 from sentinel.data.quality import schema_table  # noqa: E402
 from sentinel.data.store import DataUnavailable, MarketData  # noqa: E402
@@ -279,6 +280,8 @@ def render_result(state: dict) -> None:
             st.dataframe(pd.DataFrame(rows), hide_index=True)
 
     render_shock_map(state)
+    if state.get("event") is not None:
+        render_reaction(state)
 
     st.subheader(f"Impact Brief ({'LLM 작성·수치 감사 통과' if state['brief_engine'] == 'llm' else '템플릿'})")
     st.markdown(state["brief"])
@@ -291,6 +294,26 @@ def render_result(state: dict) -> None:
             st.dataframe(sig.style.format({"value": "{:.4f}", "z": "{:+.2f}"}), hide_index=True)
         if p.notes:
             st.write("\n".join(f"- {n}" for n in p.notes))
+
+
+def render_reaction(state: dict) -> None:
+    """Replay only: which hypothesis the first-day reaction resembles. Explanation, not a forecast."""
+    ev = state["event"]
+    r = tools.reaction_hypotheses(md, state["weights"], ev.t0, state["classification"], ev.id)
+    res = r.value
+    if res is None or res.pool.empty:
+        return
+    with st.expander(f"첫날 반응 해석 ({res.detect.date()} 종가 시점, 설명용)"):
+        st.caption("사건을 여러 해석(가설)으로 나눠 각각 유사 사건을 찾고, 과거 사건의 첫날 팩터 반응이 이번 첫날 반응과 "
+                   "얼마나 닮았는지로 가설별 무게를 매겼어요. 감지 시점 백테스트에서 이후 수익률을 0%보다 잘 맞히지 못해 "
+                   "예측값에는 쓰지 않아요.")
+        st.metric("첫날 포트폴리오 반응", pct(res.observed_portfolio))
+        hy = pd.DataFrame([{"가설": h.label, "유사 사건 수": len(h.analogs), "첫날 반응 부합도": h.posterior}
+                           for h in res.hypotheses if h.analogs]).sort_values("첫날 반응 부합도", ascending=False)
+        st.dataframe(hy.style.format({"첫날 반응 부합도": "{:.0%}"}), hide_index=True)
+        pool = res.pool.head(6)[["name", "similarity", "likelihood", "weight"]]
+        pool.columns = ["첫날 반응이 닮은 과거 사건", "태그 유사도", "반응 유사도", "가중치"]
+        st.dataframe(pool.style.format({"태그 유사도": "{:.2f}", "반응 유사도": "{:.2f}", "가중치": "{:.0%}"}), hide_index=True)
 
 
 # ------------------------------------------------------------------------ tabs
@@ -447,6 +470,19 @@ with tab_bt:
                           yaxis_tickformat="+.1%", plot_bgcolor="#fcfcfb", margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(fig, width="stretch")
         st.dataframe(g, hide_index=True)
+
+    det_path = config.REPORT_DIR / f"detection_{preset_key}.csv"
+    if preset_key in PRESETS and det_path.exists():
+        st.subheader("감지 시점 백테스트 (첫날 반응 관측 후, 남은 수익률 평가)")
+        sd = summarize_detection(pd.read_csv(det_path))
+        ci = lambda r, k: f"{r[k]:+.0%} ({r[k + '_lo']:+.0%} ~ {r[k + '_hi']:+.0%})"  # noqa: E731
+        st.dataframe(pd.DataFrame([{
+            "기간": r["horizon"], "방식": r["label"], "사건 수": r["events"], "MAE": f"{r['mae']:.2%}",
+            "MAE(0%)": f"{r['mae_zero_baseline']:.2%}", "0% 대비": ci(r, "skill_vs_zero"),
+            "기존 방식 대비": "-" if r["method"] == "base" else ci(r, "skill_vs_base"),
+        } for _, r in sd.iterrows()]), hide_index=True)
+        st.caption("첫날 반응이 보인 뒤의 남은 움직임은 어떤 방식도 0%(첫날 수준 유지)보다 잘 맞히지 못함. "
+                   "그래서 Replay의 '첫날 반응 해석'은 설명용으로만 표시함. 괄호는 사건 단위 부트스트랩 90% 신뢰구간.")
 
 with tab_data:
     st.write("수집 데이터의 출처, 수집 시각, 이용 조건, 전처리 내역 (공모전 실증 요구 대응).")

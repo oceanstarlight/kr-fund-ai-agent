@@ -53,3 +53,12 @@ def test_realized_remaining_starts_after_first_day(synthetic_md):
     d1, d5 = synthetic_md.window(ev.t0, 1)[1], synthetic_md.window(ev.t0, 5)[1]
     p = synthetic_md.prices["SPY"]
     assert abs(hyp.realized_remaining(synthetic_md, w, ev.t0, 5) - (p[d5] / p[d1] - 1)) < 1e-12
+
+
+def test_reaction_tool_unknowns_are_digit_free(synthetic_md):
+    from sentinel import tools
+
+    ev = _event()
+    r = tools.reaction_hypotheses(synthetic_md, {"SPY": 1.0}, ev.t0, ev.tags(), ev.id)
+    assert r.value is not None and r.unknowns
+    assert not any(ch.isdigit() for u in r.unknowns for ch in u.message)
