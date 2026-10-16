@@ -13,5 +13,4 @@
 - 앱: `streamlit run app/streamlit_app.py`
 - LLM은 Planner(분류·검색 조건)와 Reviewer(검토·해석)에만 쓴다. 모든 수치는 `sentinel/quant`·`sentinel/tools.py`의 Python 코드가 계산한다.
 - 도구는 값과 함께 근거(evidence)와 한계(unknowns)를 반환한다. unknowns 메시지에는 숫자를 쓰지 않는다(LLM 입력용).
-- API 키는 git에 올리지 않는 `.env`에 둔다.
-- 코드 주석에 이모티콘을 쓰지 않는다.
+
