@@ -1,0 +1,188 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 2020" width="1500" height="2020" font-family="'Noto Sans KR','Malgun Gothic','Apple SD Gothic Neo','WenQuanYi Zen Hei',sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5f6368"/>
+    </marker>
+    <marker id="arrR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#d93025"/>
+    </marker>
+    <marker id="arrG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#188038"/>
+    </marker>
+    <marker id="arrP" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8e44ad"/>
+    </marker>
+    <style>
+      .t  { font-size: 22px; font-weight: 700; fill: #202124; }
+      .s  { font-size: 15px; fill: #3c4043; }
+      .xs { font-size: 13px; fill: #5f6368; }
+      .lbl{ font-size: 14px; font-weight: 600; }
+      .llm  { fill: #e8f0fe; stroke: #3b6fd8; stroke-width: 2; }
+      .py   { fill: #e6f4ea; stroke: #2e8b57; stroke-width: 2; }
+      .dec  { fill: #fff4e5; stroke: #e08a00; stroke-width: 2.5; }
+      .sto  { fill: #f1f3f4; stroke: #80868b; stroke-width: 2; }
+      .trg  { fill: #f3e8fd; stroke: #8e44ad; stroke-width: 2; }
+      .line { stroke: #5f6368; stroke-width: 2.2; fill: none; }
+    </style>
+  </defs>
+
+  <rect width="1500" height="2020" fill="#ffffff"/>
+
+  <!-- Title -->
+  <text x="700" y="52" text-anchor="middle" font-size="32" font-weight="800" fill="#202124">MACRO SENTINEL 작동 파이프라인</text>
+  <text x="700" y="84" text-anchor="middle" class="s">감시 → 분석 → 정량화 → 검증 → 브리프 → 실측 보정</text>
+
+  <!-- Legend -->
+  <g transform="translate(1130,130)">
+    <rect x="0" y="0" width="330" height="250" rx="12" fill="#fafafa" stroke="#dadce0"/>
+    <text x="20" y="34" class="lbl" fill="#202124">범례</text>
+    <rect x="20" y="52" width="34" height="22" rx="5" class="trg"/><text x="66" y="69" class="s">트리거 (입력)</text>
+    <rect x="20" y="86" width="34" height="22" rx="5" class="llm"/><text x="66" y="103" class="s">LLM Agent (판단·설명)</text>
+    <rect x="20" y="120" width="34" height="22" rx="5" class="py"/><text x="66" y="137" class="s">Python 엔진 (계산 전담)</text>
+    <rect x="20" y="154" width="34" height="22" rx="5" class="dec"/><text x="66" y="171" class="s">검증·분기</text>
+    <rect x="20" y="188" width="34" height="22" rx="5" class="sto"/><text x="66" y="205" class="s">저장소·산출물</text>
+    <line x1="20" y1="232" x2="54" y2="232" stroke="#d93025" stroke-width="2.5" stroke-dasharray="7 5"/><text x="66" y="237" class="s">루프 (재분석·보정)</text>
+  </g>
+
+  <!-- Triggers -->
+  <rect x="380" y="130" width="195" height="78" rx="12" class="trg"/>
+  <text x="477" y="163" text-anchor="middle" class="lbl" fill="#202124">주기 감시</text>
+  <text x="477" y="188" text-anchor="middle" class="xs">GitHub Actions 15~30분</text>
+
+  <rect x="602" y="130" width="196" height="78" rx="12" class="trg"/>
+  <text x="700" y="163" text-anchor="middle" class="lbl" fill="#202124">사용자 질의 (Ask)</text>
+  <text x="700" y="188" text-anchor="middle" class="xs">"대만 리스크 노출은?"</text>
+
+  <rect x="825" y="130" width="195" height="78" rx="12" class="trg"/>
+  <text x="922" y="163" text-anchor="middle" class="lbl" fill="#202124">Replay</text>
+  <text x="922" y="188" text-anchor="middle" class="xs">과거 사건 재생·백테스트</text>
+
+  <path d="M477,208 L477,232 L700,232" class="line"/>
+  <path d="M922,208 L922,232 L700,232" class="line"/>
+  <path d="M700,208 L700,256" class="line" marker-end="url(#arr)"/>
+
+  <!-- 0 Orchestrator -->
+  <rect x="380" y="260" width="640" height="72" rx="12" class="llm"/>
+  <text x="700" y="290" text-anchor="middle" class="t">0. Orchestrator</text>
+  <text x="700" y="317" text-anchor="middle" class="s">모드 판단 · 작업 계획 · 분기 결정</text>
+
+  <!-- Ask bypass (right) -->
+  <path d="M1020,296 L1065,296 L1065,580 L1024,580" stroke="#8e44ad" stroke-width="2.2" fill="none" marker-end="url(#arrP)"/>
+  <text x="1075" y="440" class="xs" fill="#8e44ad" font-weight="600">질의 모드</text>
+  <text x="1075" y="458" class="xs" fill="#8e44ad" font-weight="600">감시 생략</text>
+
+  <path d="M700,332 L700,376" class="line" marker-end="url(#arr)"/>
+
+  <!-- 1 Sentinel -->
+  <rect x="380" y="380" width="640" height="84" rx="12" class="llm"/>
+  <text x="700" y="412" text-anchor="middle" class="t">1. Sentinel</text>
+  <text x="700" y="440" text-anchor="middle" class="s">뉴스량·논조 · 지정학 리스크 지수 · 유가/VIX/환율 이상치 (z-score)</text>
+
+  <!-- idle -->
+  <path d="M380,422 L284,422" class="line" marker-end="url(#arr)"/>
+  <rect x="120" y="395" width="160" height="54" rx="27" class="sto"/>
+  <text x="200" y="428" text-anchor="middle" class="lbl" fill="#3c4043">대기</text>
+  <text x="332" y="410" text-anchor="middle" class="xs">신호 없음</text>
+
+  <path d="M700,464 L700,516" class="line" marker-end="url(#arr)"/>
+  <text x="712" y="496" class="xs">신호 감지</text>
+
+  <!-- 2 Event Analyst -->
+  <rect x="380" y="520" width="640" height="84" rx="12" class="llm"/>
+  <text x="700" y="552" text-anchor="middle" class="t">2. Event Analyst</text>
+  <text x="700" y="580" text-anchor="middle" class="s">사건 분류 (유형·지역·전이 경로) · 유사 과거 사건 k건 검색</text>
+
+  <path d="M700,604 L700,646" class="line" marker-end="url(#arr)"/>
+
+  <!-- 3 Scenario Builder -->
+  <rect x="380" y="650" width="640" height="84" rx="12" class="py"/>
+  <text x="700" y="682" text-anchor="middle" class="t">3. Scenario Builder</text>
+  <text x="700" y="710" text-anchor="middle" class="s">유사 사건 구간의 실측 팩터 변화 → 기본(중앙값) / 불리(하위 25%) 시나리오</text>
+
+  <path d="M700,734 L700,776" class="line" marker-end="url(#arr)"/>
+
+  <!-- 4 Quant Engine -->
+  <rect x="380" y="780" width="640" height="230" rx="12" class="py"/>
+  <text x="700" y="812" text-anchor="middle" class="t">4. Quant Engine</text>
+  <text x="700" y="836" text-anchor="middle" class="xs">LLM은 계산하지 않음 · 모든 결과에 출처 ID 부착</text>
+  <rect x="405" y="852" width="285" height="78" rx="10" fill="#ffffff" stroke="#2e8b57" stroke-width="1.5"/>
+  <text x="547" y="882" text-anchor="middle" class="lbl" fill="#188038">엔진 A · 팩터 모델</text>
+  <text x="547" y="908" text-anchor="middle" class="s">민감도(β) × 충격</text>
+  <rect x="710" y="852" width="285" height="78" rx="10" fill="#ffffff" stroke="#2e8b57" stroke-width="1.5"/>
+  <text x="852" y="882" text-anchor="middle" class="lbl" fill="#188038">엔진 B · 사건 재현</text>
+  <text x="852" y="908" text-anchor="middle" class="s">과거 사건 때 실제 수익률 적용</text>
+  <text x="700" y="964" text-anchor="middle" class="s">포트폴리오 합산 · VaR/CVaR · 자산별 기여도</text>
+  <text x="700" y="990" text-anchor="middle" class="s">대체자산 프록시 보정 · 기업 DCF Drill-down</text>
+
+  <path d="M700,1010 L700,1052" class="line" marker-end="url(#arr)"/>
+
+  <!-- 5 Policy Checker -->
+  <rect x="380" y="1056" width="640" height="84" rx="12" class="llm"/>
+  <text x="700" y="1088" text-anchor="middle" class="t">5. Policy Checker</text>
+  <text x="700" y="1116" text-anchor="middle" class="s">투자정책서(IPS) RAG · 지역·자산군·손실 한도 위반 점검</text>
+
+  <path d="M700,1140 L700,1180" class="line" marker-end="url(#arr)"/>
+
+  <!-- 6 Verifier diamond -->
+  <polygon points="700,1184 900,1264 700,1344 500,1264" class="dec"/>
+  <text x="700" y="1256" text-anchor="middle" class="t">6. Verifier</text>
+  <text x="700" y="1282" text-anchor="middle" class="xs">엔진 간 차이 · 수치-출처 대조</text>
+  <text x="700" y="1300" text-anchor="middle" class="xs">데이터 결측 · 신뢰도 등급</text>
+
+  <!-- Verifier loop (left) -->
+  <path d="M500,1264 L300,1264 L300,562 L376,562" stroke="#d93025" stroke-width="2.5" stroke-dasharray="8 6" fill="none" marker-end="url(#arrR)"/>
+  <text x="150" y="880" class="lbl" fill="#d93025">불일치 · 근거 부족</text>
+  <text x="150" y="902" class="lbl" fill="#d93025">→ 재분석</text>
+  <text x="150" y="924" class="xs" fill="#d93025">(최대 2회)</text>
+
+  <path d="M700,1344 L700,1386" class="line" marker-end="url(#arr)"/>
+  <text x="712" y="1372" class="xs">통과</text>
+
+  <!-- 7 Brief -->
+  <rect x="380" y="1390" width="640" height="84" rx="12" class="llm"/>
+  <text x="700" y="1422" text-anchor="middle" class="t">7. Brief &amp; Alert</text>
+  <text x="700" y="1450" text-anchor="middle" class="s">1페이지 Impact Brief · 대시보드 · 알림 (숫자는 저장소 값만 인용)</text>
+
+  <path d="M600,1474 L600,1496 L520,1496 L520,1520" class="line" marker-end="url(#arr)"/>
+  <path d="M800,1474 L800,1496 L880,1496 L880,1520" class="line" marker-end="url(#arr)"/>
+
+  <rect x="380" y="1524" width="280" height="70" rx="12" class="trg"/>
+  <text x="520" y="1554" text-anchor="middle" class="lbl" fill="#202124">담당자 확인</text>
+  <text x="520" y="1578" text-anchor="middle" class="xs">Human-in-the-loop</text>
+
+  <rect x="740" y="1524" width="280" height="70" rx="12" class="sto"/>
+  <text x="880" y="1554" text-anchor="middle" class="lbl" fill="#202124">이벤트·예측 저장소</text>
+  <text x="880" y="1578" text-anchor="middle" class="xs">예측값 · 근거 · 시각 기록</text>
+
+  <path d="M880,1594 L880,1636" class="line" marker-end="url(#arr)"/>
+
+  <!-- 8 Tracker -->
+  <rect x="380" y="1640" width="640" height="84" rx="12" class="py"/>
+  <text x="700" y="1672" text-anchor="middle" class="t">8. Tracker</text>
+  <text x="700" y="1700" text-anchor="middle" class="s">D+1 / D+5 / D+20 실측 vs 예측 · 오차 분해 (시나리오 오차 / 민감도 오차)</text>
+
+  <!-- Tracker loop (right) -->
+  <path d="M1020,1682 L1090,1682 L1090,895 L1024,895" stroke="#188038" stroke-width="2.5" stroke-dasharray="8 6" fill="none" marker-end="url(#arrG)"/>
+  <text x="1105" y="1280" class="lbl" fill="#188038">자기 보정 루프</text>
+  <text x="1105" y="1302" class="xs" fill="#188038">민감도 · 유사 사건</text>
+  <text x="1105" y="1320" class="xs" fill="#188038">가중치 갱신</text>
+
+  <path d="M700,1724 L700,1766" class="line" marker-end="url(#arr)"/>
+
+  <rect x="480" y="1770" width="440" height="62" rx="31" class="sto"/>
+  <text x="700" y="1808" text-anchor="middle" class="lbl" fill="#202124">Track Record (예측 성적표)</text>
+
+  <!-- Data layer -->
+  <rect x="60" y="1870" width="1380" height="118" rx="14" fill="#fafafa" stroke="#dadce0" stroke-width="2"/>
+  <text x="90" y="1906" class="lbl" fill="#202124">데이터 레이어 (모든 Tool은 캐시 DB 경유 조회 · 출처·수집일·라이선스 기록)</text>
+  <g font-size="15" fill="#3c4043">
+    <rect x="90"  y="1924" width="150" height="40" rx="8" fill="#fff" stroke="#dadce0"/><text x="165" y="1950" text-anchor="middle">GDELT 뉴스</text>
+    <rect x="255" y="1924" width="150" height="40" rx="8" fill="#fff" stroke="#dadce0"/><text x="330" y="1950" text-anchor="middle">GPR 지수</text>
+    <rect x="420" y="1924" width="150" height="40" rx="8" fill="#fff" stroke="#dadce0"/><text x="495" y="1950" text-anchor="middle">FRED · ECOS</text>
+    <rect x="585" y="1924" width="150" height="40" rx="8" fill="#fff" stroke="#dadce0"/><text x="660" y="1950" text-anchor="middle">시세 API</text>
+    <rect x="750" y="1924" width="150" height="40" rx="8" fill="#fff" stroke="#dadce0"/><text x="825" y="1950" text-anchor="middle">EDGAR · DART</text>
+    <rect x="915" y="1924" width="150" height="40" rx="8" fill="#fff" stroke="#dadce0"/><text x="990" y="1950" text-anchor="middle">Tavily 검색</text>
+    <rect x="1080" y="1924" width="150" height="40" rx="8" fill="#fff" stroke="#dadce0"/><text x="1155" y="1950" text-anchor="middle">사건 라이브러리</text>
+    <rect x="1245" y="1924" width="170" height="40" rx="8" fill="#fff" stroke="#dadce0"/><text x="1330" y="1950" text-anchor="middle">정책 문서 (RAG)</text>
+  </g>
+</svg>
