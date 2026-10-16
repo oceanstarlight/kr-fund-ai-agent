@@ -116,10 +116,10 @@ def classify_event(text: str) -> tuple[EventClassification, str]:
             output_format=EventClassification,
         )
         if resp.stop_reason == "refusal" or resp.parsed_output is None:
-            return classify_rules(text), "rules"
+            return classify_rules(text), f"rules (llm stop_reason={resp.stop_reason})"
         return resp.parsed_output, "llm"
-    except Exception:  # network/API failure must not break the pipeline
-        return classify_rules(text), "rules"
+    except Exception as exc:  # network/API failure must not break the pipeline
+        return classify_rules(text), f"rules (llm error: {type(exc).__name__})"
 
 
 # ---------------------------------------------------------------------------- brief
@@ -133,7 +133,15 @@ BRIEF_SYSTEM = (
 )
 
 _PLACEHOLDER = re.compile(r"\[\[([a-zA-Z0-9_]+)\]\]")
-_ALLOWED_DIGITS = re.compile(r"D\+\d+")
+_ALLOWED_DIGITS = re.compile(r"D\+(?:1|5|20)\b|^\s*\d+\.\s", re.MULTILINE)
+# Numbers spelled out in words would bypass the digit check.
+_NUMBER_WORDS = re.compile(
+    r"(?:[일이삼사오육칠팔구십백천만]+\s*(?:퍼센트|프로|배|분의))|퍼센트|절반|두\s*배|세\s*배|"
+    r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|twenty|thirty|fifty|hundred|"
+    r"percent|half|double|triple)\b",
+    re.IGNORECASE,
+)
+_NUMERIC_TOKEN = re.compile(r"[+-]?\d[\d,]*(?:\.\d+)?")
 
 
 def audit_brief(raw: str, facts: dict[str, str]) -> list[str]:
@@ -142,10 +150,23 @@ def audit_brief(raw: str, facts: dict[str, str]) -> list[str]:
     for key in _PLACEHOLDER.findall(raw):
         if key not in facts:
             problems.append(f"unknown fact key: {key}")
+    if re.search(r"\]\]\s*(?:%|%p|bp|퍼센트)", raw):
+        problems.append("unit appended to a placeholder")
     stripped = _ALLOWED_DIGITS.sub("", _PLACEHOLDER.sub("", raw))
     stray = re.findall(r"\d", stripped)
     if stray:
         problems.append(f"{len(stray)} digit(s) written outside placeholders")
+    words = _NUMBER_WORDS.findall(stripped)
+    if words:
+        problems.append(f"number words outside placeholders: {', '.join(sorted(set(words)))[:80]}")
+    if not problems:
+        # After substitution every numeric token must come from a fact value, a horizon
+        # label or a list marker.
+        filled = _ALLOWED_DIGITS.sub("", fill_placeholders(raw, facts))
+        allowed = {m for v in facts.values() for m in _NUMERIC_TOKEN.findall(v)}
+        extra = [m for m in _NUMERIC_TOKEN.findall(filled) if m not in allowed]
+        if extra:
+            problems.append(f"numeric tokens not traceable to facts: {extra[:5]}")
     return problems
 
 

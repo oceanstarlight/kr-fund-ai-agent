@@ -78,8 +78,12 @@ class MarketData:
                 if any(d not in rets for d in deps) or any(d in pending and d != t for d in deps):
                     nxt.append(t)
                     continue
-                proxy = sum(rets[d].fillna(0.0) * w for d, w in deps.items())
-                mask = rets[t].index < inception[t]
+                dep_df = pd.DataFrame({d: rets[d] for d in deps})
+                proxy = (dep_df.fillna(0.0) * pd.Series(deps)).sum(axis=1)
+                # No proxy where none of the dependencies existed yet (keeps NaN, not 0%).
+                proxy = proxy.where(dep_df.notna().any(axis=1))
+                # Pre-inception days plus the inception day itself (its own return is NaN).
+                mask = (rets[t].index <= inception[t]) & rets[t].isna()
                 rets[t] = rets[t].where(~mask, proxy)
             if nxt == pending:
                 break

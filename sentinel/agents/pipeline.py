@@ -262,7 +262,8 @@ def build_facts(state: State) -> dict[str, str]:
         if r.get("var") == r.get("var"):
             facts[f"var95_{h}d"] = f"{-r['var']:+.2%}"
     p = state["impacts"].get(config.PRIMARY_HORIZON) or next(iter(state["impacts"].values()))
-    for i, (t, c) in enumerate(p.contribution.head(3).items(), 1):
+    losses = p.contribution[p.contribution < 0]
+    for i, (t, c) in enumerate(losses.head(3).items(), 1):
         facts[f"top_loss_{i}_asset"] = ASSETS[t].name
         facts[f"top_loss_{i}_contrib"] = f"{c:+.2%}"
     table = state["scenario"].get(config.PRIMARY_HORIZON, {}).get("table")
@@ -292,6 +293,8 @@ def template_brief(facts: dict[str, str], state: State) -> str:
     if f"pnl_q50_{h}d" in facts:
         lines.append(f"\n- 운용자산 기준 D+{h} 예상 손익: {facts[f'pnl_q50_{h}d']} (불리 {facts[f'pnl_q25_{h}d']})")
     lines += ["", "### 주요 기여 자산 (손실 기여 상위)"]
+    if "top_loss_1_asset" not in facts:
+        lines.append("- 손실 기여 자산 없음")
     for i in (1, 2, 3):
         if f"top_loss_{i}_asset" in facts:
             lines.append(f"{i}. {facts[f'top_loss_{i}_asset']}: {facts[f'top_loss_{i}_contrib']}")

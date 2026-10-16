@@ -84,6 +84,15 @@ with st.sidebar.expander("포트폴리오 구성"):
         hide_index=True,
     )
     st.caption(preset_note)
+# Results are only shown for the inputs they were computed with.
+run_key = (preset_key, tuple(sorted(weights.items())), aum, currency, offline)
+
+
+def fresh(name: str):
+    item = st.session_state.get(name)
+    return item["result"] if item and item["key"] == run_key else None
+
+
 st.sidebar.markdown(
     f"**LLM**: {'연결됨 (분류 ' + config.MODEL_FAST + ', 브리프 ' + config.MODEL_SMART + ')' if llm_available() else '미연결 → 규칙 기반 분류 + 템플릿 브리프'}"
 )
@@ -165,11 +174,11 @@ def render_result(state: dict) -> None:
     c1, c2 = st.columns([3, 2])
     with c1:
         st.subheader("기간별 예측 vs 실측")
-        st.plotly_chart(horizon_chart(state), use_container_width=True)
+        st.plotly_chart(horizon_chart(state), width="stretch")
         st.caption("D+20은 백테스트상 0% 기준선보다 오차가 커서 참고용으로만 표시함.")
     with c2:
         st.subheader(f"자산별 기여도 (D+{h})")
-        st.plotly_chart(contribution_chart(state), use_container_width=True)
+        st.plotly_chart(contribution_chart(state), width="stretch")
 
     c3, c4 = st.columns(2)
     with c3:
@@ -182,6 +191,7 @@ def render_result(state: dict) -> None:
                                             "엔진A": "{:+.2%}", "엔진B": "{:+.2%}", "통합": "{:+.2%}"}), hide_index=True)
     with c4:
         st.subheader(f"충격 시나리오 (D+{h}, 유사 사건 실측 분포)")
+        st.caption("변동성 국면 보정 전 원시 값. 포트폴리오 영향 계산에는 사건별 보정 배수가 곱해짐.")
         t = state["scenario"][h]["table"]
         if not t.empty:
             rows = []
@@ -216,34 +226,43 @@ with tab_replay:
     ev = next(e for e in events if e.id == ev_id)
     st.caption(f"{ev.description}" + (f"  \n※ {ev.note}" if ev.note else ""))
     if st.button("Replay 실행", type="primary"):
-        st.session_state["replay"] = run(md, weights, mode="replay", event_id=ev_id, aum=aum, currency=currency)
-    if st.session_state.get("replay") and st.session_state["replay"].get("event") and st.session_state["replay"]["event"].id == ev_id:
-        render_result(st.session_state["replay"])
+        st.session_state["replay"] = {"key": run_key, "result": run(md, weights, mode="replay", event_id=ev_id, aum=aum, currency=currency)}
+    rp = fresh("replay")
+    if rp and rp.get("event") and rp["event"].id == ev_id:
+        render_result(rp)
 
 with tab_ask:
     st.write(f"최신 종가({md.last_date.date()}) 기준으로, 입력한 사건이 지금 일어났다고 가정하고 영향을 추정해요.")
     text = st.text_area("사건 설명 (한국어/영어)", placeholder="예: Iran closes the Strait of Hormuz after US strikes / 대만 해협 봉쇄")
     if st.button("분석", type="primary", disabled=not text.strip()):
-        st.session_state["ask"] = run(md, weights, mode="ask", event_text=text, aum=aum, currency=currency)
-    if st.session_state.get("ask"):
-        cls = st.session_state["ask"]["classification"]
-        st.caption(f"분류: {cls['type']} / {cls['region']} / {', '.join(cls['channels'])} ({st.session_state['ask']['classifier']}) - {cls.get('rationale_ko', '')}")
-        render_result(st.session_state["ask"])
+        st.session_state["ask"] = {"key": run_key, "result": run(md, weights, mode="ask", event_text=text, aum=aum, currency=currency)}
+    ak = fresh("ask")
+    if ak:
+        cls = ak["classification"]
+        st.caption(f"분류: {cls['type']} / {cls['region']} / {', '.join(cls['channels'])} ({ak['classifier']}) - {cls.get('rationale_ko', '')}")
+        render_result(ak)
 
 with tab_bt:
     st.write("사건 라이브러리 전체에 대한 Leave-one-out 백테스트 (사건 직전 데이터만 사용).")
     if st.button("현재 포트폴리오로 백테스트 실행"):
         with st.spinner("백테스트 실행 중..."):
-            st.session_state["bt"] = run_backtest(md, weights)
-    bt = st.session_state.get("bt")
+            st.session_state["bt"] = {"key": run_key, "result": run_backtest(md, weights)}
+    bt = fresh("bt")
     if bt is None and preset_key in PRESETS and (config.REPORT_DIR / f"backtest_{preset_key}.csv").exists():
         bt = pd.read_csv(config.REPORT_DIR / f"backtest_{preset_key}.csv")
     if bt is not None and not bt.empty:
         s = summarize(bt)
-        show = s[["horizon", "events", "direction_hit", "mae_blend", "mae_zero_baseline", "skill_vs_zero", "iqr_coverage", "rank_corr"]]
-        show.columns = ["기간", "사건 수", "방향 적중", "MAE", "MAE(0% 기준선)", "기준선 대비 개선", "구간 포함률", "순위상관"]
-        st.dataframe(show.style.format({"방향 적중": "{:.0%}", "MAE": "{:.2%}", "MAE(0% 기준선)": "{:.2%}",
-                                         "기준선 대비 개선": "{:+.0%}", "구간 포함률": "{:.0%}", "순위상관": "{:+.2f}"}), hide_index=True)
+        cols = ["horizon", "events", "direction_hit", "mae_blend", "mae_zero_baseline", "skill_vs_zero", "iqr_coverage", "rank_corr"]
+        names = ["기간", "사건 수", "방향 적중", "MAE", "MAE(0% 기준선)", "0% 기준선 대비 개선", "구간 포함률", "순위상관"]
+        if "mae_shock_baseline" in s:
+            cols += ["mae_shock_baseline", "direction_hit_shock_baseline"]
+            names += ["MAE(충격 기준선)", "방향 적중(충격 기준선)"]
+        show = s[cols]
+        show.columns = names
+        st.dataframe(show.style.format({"방향 적중": "{:.0%}", "MAE": "{:.2%}", "MAE(0% 기준선)": "{:.2%}", "0% 기준선 대비 개선": "{:+.0%}",
+                                         "구간 포함률": "{:.0%}", "순위상관": "{:+.2f}", "MAE(충격 기준선)": "{:.2%}",
+                                         "방향 적중(충격 기준선)": "{:.0%}"}), hide_index=True)
+        st.caption("충격 기준선 = 과거 사건 전체의 실측 중앙값. 사건 라이브러리는 사후 선별이라 선택 편향이 있음.")
         hsel = st.radio("기간", sorted(bt["horizon"].unique()), horizontal=True, format_func=lambda h: f"D+{h}")
         g = bt[bt["horizon"] == hsel]
         lim = max(g["pred"].abs().max(), g["realized"].abs().max()) * 1.1
@@ -255,7 +274,7 @@ with tab_bt:
         fig.add_shape(type="line", x0=-lim, y0=-lim, x1=lim, y1=lim, line=dict(color="#c3c2b7", dash="dot"))
         fig.update_layout(height=420, xaxis_title="예측", yaxis_title="실측", xaxis_tickformat="+.1%",
                           yaxis_tickformat="+.1%", plot_bgcolor="#fcfcfb", margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
         st.dataframe(g, hide_index=True)
 
 with tab_data:

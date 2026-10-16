@@ -52,3 +52,22 @@ def test_rule_classifier_korean():
     c = llm.classify_rules("대만 해협 봉쇄로 반도체 공급망 우려")
     assert c.region == "east_asia"
     assert "supply_chain" in c.channels
+
+
+def test_brief_audit_blocks_known_loopholes():
+    facts = {"port_q50_5d": "-1.20%", "base_date": "2025-06-12"}
+    for bad in ["손실은 삼 퍼센트 수준", "about twenty percent", "D+99 전망", "[[port_q50_5d]]% 하락", "손실이 두 배"]:
+        assert llm.audit_brief(bad, facts), bad
+    # Numbered lists and allowed horizons pass.
+    assert llm.audit_brief("1. [[port_q50_5d]] (D+5)\n2. 기준일 [[base_date]]", facts) == []
+
+
+def test_backfill_keeps_nan_before_any_proxy_exists():
+    import numpy as np
+    days = pd.bdate_range("2010-01-01", periods=10)
+    spy = pd.Series(np.linspace(100, 109, 10), index=days)
+    ief = pd.Series([np.nan] * 6 + [100, 101, 102, 103], index=days)
+    from sentinel.data.store import MarketData
+    md = MarketData.from_raw({"SPY": spy, "IEF": ief, "TLT": ief.copy()}, {}, None)
+    # TLT backfills from IEF only, which did not exist yet: no fake flat prices.
+    assert md.prices["TLT"].iloc[:4].isna().all()
