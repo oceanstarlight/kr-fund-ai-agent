@@ -297,23 +297,29 @@ def render_result(state: dict) -> None:
 
 
 def render_reaction(state: dict) -> None:
-    """Replay only: which hypothesis the first-day reaction resembles. Explanation, not a forecast."""
+    """Replay only: forecast updated at the first reaction close (when the sentinel can fire)."""
     ev = state["event"]
-    r = tools.reaction_hypotheses(md, state["weights"], ev.t0, state["classification"], ev.id)
-    res = r.value
-    if res is None or res.pool.empty:
+    res = tools.reaction_update(md, state["weights"], ev.t0, state["classification"], ev.id).value
+    if res is None or res.pool.empty or not res.remaining:
         return
-    with st.expander(f"첫날 반응 해석 ({res.detect.date()} 종가 시점, 설명용)"):
-        st.caption("사건을 여러 해석(가설)으로 나눠 각각 유사 사건을 찾고, 과거 사건의 첫날 팩터 반응이 이번 첫날 반응과 "
-                   "얼마나 닮았는지로 가설별 무게를 매겼어요. 감지 시점 백테스트에서 이후 수익률을 0%보다 잘 맞히지 못해 "
-                   "예측값에는 쓰지 않아요.")
-        st.metric("첫날 포트폴리오 반응", pct(res.observed_portfolio))
-        hy = pd.DataFrame([{"가설": h.label, "유사 사건 수": len(h.analogs), "첫날 반응 부합도": h.posterior}
-                           for h in res.hypotheses if h.analogs]).sort_values("첫날 반응 부합도", ascending=False)
-        st.dataframe(hy.style.format({"첫날 반응 부합도": "{:.0%}"}), hide_index=True)
-        pool = res.pool.head(6)[["name", "similarity", "likelihood", "weight"]]
-        pool.columns = ["첫날 반응이 닮은 과거 사건", "태그 유사도", "반응 유사도", "가중치"]
-        st.dataframe(pool.style.format({"태그 유사도": "{:.2f}", "반응 유사도": "{:.2f}", "가중치": "{:.0%}"}), hide_index=True)
+    st.subheader(f"감지 시점 갱신 예측 ({res.detect.date()} 종가)")
+    st.caption("첫날 반응을 본 뒤, 첫날 팩터 반응이 이번과 닮은 과거 사건에 더 큰 가중을 줘서 남은 기간을 다시 추정해요. "
+               "감지 시점 백테스트에서 기존 방식보다 D+20 오차가 작았지만, '첫날 수준 유지(0%)'보다 낫다는 근거는 "
+               "없어서 구간과 함께 참고용으로 보세요.")
+    real = state.get("realized") or {}
+    cols = st.columns(len(res.remaining) + 1)
+    cols[0].metric("첫날 반응(실측)", pct(res.observed_portfolio))
+    for col, (h, p) in zip(cols[1:], res.remaining.items()):
+        cum = res.cumulative[h]
+        col.metric(f"D+{h} 누적 (갱신)", pct(cum["q50"]))
+        rh = real.get(h)
+        col.caption(f"남은 기간 {pct(p.blend['q50'])} (구간 {pct(p.blend['q25'])} ~ {pct(p.blend['q75'])})"
+                    + (f" · 실측 누적 {pct(rh['realized'])}" if rh else ""))
+    if res.notes:
+        st.caption(" / ".join(res.notes))
+    pool = res.pool.head(6)[["name", "similarity", "likelihood", "weight"]]
+    pool.columns = ["유사 사건", "태그 유사도", "첫날 반응 유사도", "가중치"]
+    st.dataframe(pool.style.format({"태그 유사도": "{:.2f}", "첫날 반응 유사도": "{:.2f}", "가중치": "{:.0%}"}), hide_index=True)
 
 
 # ------------------------------------------------------------------------ tabs
@@ -481,8 +487,8 @@ with tab_bt:
             "MAE(0%)": f"{r['mae_zero_baseline']:.2%}", "0% 대비": ci(r, "skill_vs_zero"),
             "기존 방식 대비": "-" if r["method"] == "base" else ci(r, "skill_vs_base"),
         } for _, r in sd.iterrows()]), hide_index=True)
-        st.caption("첫날 반응이 보인 뒤의 남은 움직임은 어떤 방식도 0%(첫날 수준 유지)보다 잘 맞히지 못함. "
-                   "그래서 Replay의 '첫날 반응 해석'은 설명용으로만 표시함. 괄호는 사건 단위 부트스트랩 90% 신뢰구간.")
+        st.caption("첫날 반응 가중은 기존 방식보다 D+20 오차가 작지만, 남은 움직임은 어떤 방식도 0%(첫날 수준 유지)보다 "
+                   "잘 맞히지 못함. 괄호는 사건 단위 부트스트랩 90% 신뢰구간.")
 
 with tab_data:
     st.write("수집 데이터의 출처, 수집 시각, 이용 조건, 전처리 내역 (공모전 실증 요구 대응).")

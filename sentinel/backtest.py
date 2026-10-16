@@ -20,7 +20,7 @@ from sentinel.quant.engines import realized
 from sentinel.data.store import MarketData
 from sentinel.events.library import load_events
 from sentinel.monitor import detect
-from sentinel.quant.hypotheses import detection_forecast, realized_remaining
+from sentinel.quant.reaction import detection_forecast, realized_remaining
 
 
 _SHARED: dict = {}  # market data handed to forked workers without pickling it per job
@@ -232,8 +232,7 @@ def to_markdown(
 # ----------------------------------------------------------------------------- detection time
 DETECTION_METHODS = {
     "base": "기존 방식(분류 1개·유사도 가중)",
-    "base_fp": "분류 1개 + 첫날 반응 가중",
-    "hypotheses": "가설 여러 개 + 첫날 반응 가중",
+    "reaction": "첫날 반응 가중",
 }
 
 
@@ -253,19 +252,18 @@ def run_detection_backtest(md: MarketData, weights: dict[str, float], horizons=(
         session = md.trading_day_on_or_after(ev.t0)
         detected = detect(md.truncate(session), session, ev.date)["triggered"]
         res = {m: detection_forecast(md, weights, ev.t0, ev.tags(), ev.id, horizons, m) for m in DETECTION_METHODS}
-        hyp = res["hypotheses"]
-        if hyp is None:
+        rx = res["reaction"]
+        if rx is None:
             continue
-        top = hyp.top()
         for h in horizons:
             r = realized_remaining(md, weights, ev.t0, h)
             if r is None or any(h not in x.remaining for x in res.values()):
                 continue
-            p = hyp.remaining[h]
+            p = rx.remaining[h]
             rows.append({
                 "event": ev.id, "name": ev.name, "t0": ev.t0.date(), "horizon": h, "selection": ev.selection,
-                "detected": detected, "day1": hyp.observed_portfolio, "top_hypothesis": top.label if top else "",
-                "top_posterior": top.posterior if top else np.nan,
+                "detected": detected, "day1": rx.observed_portfolio,
+                "top_analog": rx.pool["name"].iloc[0] if not rx.pool.empty else "",
                 **{f"pred_{m}": x.remaining[h].blend["q50"] for m, x in res.items()},
                 "q25": p.blend["q25"], "q75": p.blend["q75"], "realized": r,
             })
@@ -307,7 +305,7 @@ def summarize_detection(df: pd.DataFrame) -> pd.DataFrame:
             for key, ref in (("zero", zero), ("shock", shock), ("base", base)):
                 row[f"skill_vs_{key}"] = float(1 - err.mean() / np.nanmean(ref)) if np.nanmean(ref) else np.nan
                 row[f"skill_vs_{key}_lo"], row[f"skill_vs_{key}_hi"] = bootstrap_skill(err, ref)
-            if m == "hypotheses":
+            if m == "reaction":
                 row["iqr_coverage"] = float(((g["realized"] >= g["q25"]) & (g["realized"] <= g["q75"])).mean())
             out.append(row)
     return pd.DataFrame(out)
@@ -321,10 +319,9 @@ def detection_markdown(df: pd.DataFrame, title: str) -> str:
         "",
         "- 시점: 사건 첫 반응일(t0) 종가. 감시 에이전트가 이상 신호를 낼 수 있는 시점이며 첫날 움직임은 이미 관측됨",
         "- 평가 대상: 남은 수익률(t0 종가 → D+h 종가). 이미 아는 첫날 움직임으로 점수가 부풀지 않게 함",
-        "- 기존 방식: 분류 1개로 찾은 유사 사건을 유사도로 가중. 첫날 반응 가중: 유사 사건의 첫날 팩터 반응이 관측과 비슷할수록 가중",
-        "- 가설: 분류 결과 + 전달 경로 가설(원유 공급 충격, 위험 회피 확산, 금리·달러 충격, 제한적 영향) 최대 4개. 규칙으로 생성, LLM 미사용",
+        "- 기존 방식: 유사 사건을 태그 유사도로 가중. 첫날 반응 가중: 유사 사건의 첫날 팩터 반응이 관측과 비슷할수록 가중. LLM 미사용",
         "- 가중 공식은 사전에 고정(튜닝 없음): 표준화 거리 제곱 평균 d², 가능도 exp(-d²/2)",
-        f"- 괄호: 사건 단위 부트스트랩 {BOOT_LEVEL:.0%} 신뢰구간({BOOT_N}회). '기존 방식 대비'가 0을 넘어야 가설 방식이 낫다고 말할 수 있음",
+        f"- 괄호: 사건 단위 부트스트랩 {BOOT_LEVEL:.0%} 신뢰구간({BOOT_N}회). '기존 방식 대비'가 0을 넘어야 첫날 반응 가중이 낫다고 말할 수 있음",
         "",
     ]
     groups = [("전체 사건", df), ("감시 에이전트가 감지한 사건만", df[df["detected"]])]
@@ -339,10 +336,10 @@ def detection_markdown(df: pd.DataFrame, title: str) -> str:
                          f"| {r['mae_shock_baseline']:.2%} | {r['direction_hit']:.0%} | {ci(r, 'skill_vs_zero')} "
                          f"| {ci(r, 'skill_vs_shock')} | {vs_base} |")
         lines.append("")
-    lines += ["## 사건별 결과 (가설 방식)", "| 사건 | t0 | 기간 | 감지 | 첫날 | 우세 가설 | 기존 | 가설 | 구간 | 실측(남은 기간) |",
+    lines += ["## 사건별 결과", "| 사건 | t0 | 기간 | 감지 | 첫날 | 반응이 가장 닮은 사건 | 기존 | 첫날 반응 가중 | 구간 | 실측(남은 기간) |",
               "|---|---|---|---|---|---|---|---|---|---|"]
     for _, r in df.iterrows():
         lines.append(f"| {r['name']} | {r['t0']} | D+{r['horizon']} | {'O' if r['detected'] else '-'} | {pct(r['day1'])} "
-                     f"| {r['top_hypothesis']} ({r['top_posterior']:.0%}) | {pct(r['pred_base'])} | {pct(r['pred_hypotheses'])} "
+                     f"| {r['top_analog']} | {pct(r['pred_base'])} | {pct(r['pred_reaction'])} "
                      f"| {pct(r['q25'])} ~ {pct(r['q75'])} | {pct(r['realized'])} |")
     return "\n".join(lines) + "\n"
